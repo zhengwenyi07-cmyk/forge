@@ -14,29 +14,59 @@ ReAct 主循环。整个 agent 的大脑。
 - 任何 LLM 细节（交给 LLMBackend）
 - 任何工具实现（交给 Tool）
 - 上下文压缩（由 context/ 模块负责）
+
+调用关系（入口 → Agent）：
+  entry/cli.py / entry/chat.py / entry/github_issue.py
+    → Agent(backend, registry, config)       ← 构建 Agent
+      → Agent.run(task, log)                 ← 执行一次完整运行
+        → _build_messages()                  ← 组装 LLM messages
+        → _call_with_retry()                 ← LLM 调用（含重试）
+        → _is_looping()                      ← 死循环检测
+        → execute_tool()                     ← 执行工具
+        → _format_*_for_history()            ← 结果回写
 """
 
 from __future__ import annotations
 
+# json：_format_action_for_history 中将参数字典序列化为 JSON 字符串
 import json
+# logging：每个 step 输出 LLM 调用、Action 类型、Reflection 触发等关键事件
 import logging
+# dataclass：AgentConfig 用 dataclass 承载配置，自动生成 __init__/__repr__
 from dataclasses import dataclass
 
+# EventLog：JSONL append-only 事件日志，记录每次运行的全部事件链
 from agent.event_log import EventLog
+# ConversationHistory：带首条保留的滑动窗口历史管理器
 from context.history import ConversationHistory
+# RepoMap：tree-sitter 仓库地图，注入 system prompt 提供全局代码结构
 from context.repo_map import RepoMap
+# TokenBudget：按优先级分配各部分的 token 配额，超出时裁剪
 from context.token_budget import TokenBudget
+# Prompt 模板函数：
+#   build_system_prompt → 渲染 system prompt（含 repo_summary 占位符）
+#   build_task_prompt → 渲染首条 user 消息（任务描述 + issue URL）
+#   reflection_no_edit / reflection_test_failed → Reflection 引导 prompt
 from agent.prompt import (
     build_system_prompt,
     build_task_prompt,
     reflection_no_edit,
     reflection_test_failed,
 )
+# 所有数据模型：
+#   Action / ActionType → LLM 决策输出
+#   Observation / ObservationStatus → 工具执行结果
+#   RunResult / RunStatus → 整次运行最终状态
+#   Task / ToolCall → 任务输入 / 工具调用参数
 from agent.task import (
     Action, ActionType, Event, EventType,
     Observation, ObservationStatus, RunResult, RunStatus, Task, ToolCall,
 )
+# LLMBackend → 抽象基类（依赖倒置：Agent 不依赖具体实现）
+# LLMMessage → 统一消息格式（system/user/assistant）
+# LLMToolSchema → 工具 JSON Schema 描述
 from llm.base import LLMBackend, LLMMessage, LLMToolSchema
+# ToolRegistry → 工具注册中心，按名称查找并执行已注册的工具
 from tools.base import ToolRegistry
 
 logger = logging.getLogger(__name__)
@@ -49,25 +79,47 @@ logger = logging.getLogger(__name__)
 @dataclass
 class AgentConfig:
     """Agent 运行时配置，从 config/default.yaml 加载后传入。"""
+    # ── 循环控制 ────────────────────────────────────────────────────────
+    # 每轮最大步数，超出则熔断（对应 resume "三种自动熔断策略" 之一）
     max_steps: int = 40
-    reflection_no_edit_steps: int = 6   # 连续 N 步无文件写操作触发 Reflection
-    loop_detection_window: int = 3       # 连续 N 步完全相同 action 判定死循环
-    test_tool_names: tuple[str, ...] = ("test", "pytest")  # 触发 Reflection 的工具名
-    budget_tokens: int = 80_000            # 总 token 预算
-    history_max_messages: int = 40         # 历史最大条数
-    llm_max_retries: int = 3               # LLM 调用失败最大重试次数
-    llm_retry_delay: float = 2.0           # 重试间隔（秒，指数退避）
-    stream: bool = False                   # 是否启用流式输出
-    stream_callback: object = None         # StreamCallback，最终回答流式回调
-    thought_callback: object = None        # StreamCallback，推理过程流式回调（推理模型专用）
-    confirm_dangerous: bool = False        # 是否对危险命令要求用户确认
-    confirm_callback: object = None        # ConfirmCallback，None=跳过确认
+    # 连续 N 步无文件写操作触发 Reflection（对应 resume "双重 Reflection" 之 B）
+    reflection_no_edit_steps: int = 6
+    # 连续 N 步相同 (tool, params) 元组判定死循环（对应 resume "死循环检测"）
+    loop_detection_window: int = 3
+    # 触发 Reflection 的工具名列表（这些工具返回 error 时注入反思 prompt）
+    test_tool_names: tuple[str, ...] = ("test", "pytest")
+    # ── 预算与历史 ─────────────────────────────────────────────────────
+    # 总 token 预算（传递给 TokenBudget，含 15% 安全预留）
+    budget_tokens: int = 80_000
+    # 历史最大消息条数（第一层裁剪：ConversationHistory 滑动窗口）
+    history_max_messages: int = 40
+    # ── 重试 ────────────────────────────────────────────────────────────
+    # LLM 调用失败最大重试次数（不重试 401/403/400 等客户端错误）
+    llm_max_retries: int = 3
+    # 重试间隔（秒，指数退避：2s → 4s → 8s）
+    llm_retry_delay: float = 2.0
+    # ── 流式输出 ────────────────────────────────────────────────────────
+    # 是否启用流式输出（True → backend.stream() 而非 complete()）
+    stream: bool = False
+    # 最终回答的流式回调（on_text 参数）
+    stream_callback: object = None
+    # 推理过程的流式回调（on_thought 参数，Chaude thinking/DeepSeek R1 专用）
+    thought_callback: object = None
+    # ── 安全确认 ────────────────────────────────────────────────────────
+    # 是否对危险命令要求用户确认
+    confirm_dangerous: bool = False
+    # 确认回调（None=直接执行，terminal_confirm=等待用户 y/n，always_deny=拒绝）
+    confirm_callback: object = None
 
 
 
-# ---------------------------------------------------------------------------
-# Agent
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# Agent — ReAct 主循环
+# 最核心的类，遵循"依赖倒置"原则——只依赖抽象，不依赖具体实现。
+# 两个依赖：
+#   LLMBackend  → 生产用 Anthropic/OpenAI，测试用 MockBackend
+#   ToolRegistry → 管理 12 个工具，新增工具无需改此文件
+# ===========================================================================
 
 class Agent:
     """
@@ -76,6 +128,11 @@ class Agent:
     用法：
         agent = Agent(backend, registry, config)
         result = agent.run(task, log)
+
+    生命周期：
+        单次模式（CLI run）：每调用一次 run() 创建一个新 Agent 实例。
+        多轮模式（CLI chat）：一个 Agent 实例跨轮复用，通过 _pending_history
+                              注入共享 history 实现跨轮对话历史保留。
     """
 
     def __init__(
@@ -84,27 +141,37 @@ class Agent:
         registry: ToolRegistry,
         config: AgentConfig | None = None,
     ) -> None:
+        # LLM 后端实例（策略模式的具体策略，测试/生产可替换）
         self._backend = backend
+        # 工具注册表（注册了 12 个 BaseTool 子类实例）
         self._registry = registry
+        # 运行时配置（熔断/重试/流式/确认参数）
         self._cfg = config or AgentConfig()
 
-    # ------------------------------------------------------------------
-    # 公开接口
-    # ------------------------------------------------------------------
+    # ==================================================================
+    # 公开接口 — run(task, log) → RunResult
+    # 这是 Agent 唯一的对外接口。调用方构造 Task 和 EventLog 后传入。
+    # ChatSession 模式通过 _pending_history 注入跨轮历史。
+    # ==================================================================
 
     def run(self, task: Task, log: EventLog) -> RunResult:
         """
-        执行一次完整的 agent 运行。
+        执行一次完整的 agent 运行（ReAct 主循环）。
 
         Args:
-            task: 任务描述
-            log:  已初始化的 EventLog（由调用方创建并传入）
+            task: 任务描述（含 repo_path / description / max_steps / budget_tokens / issue_url）
+            log:  已初始化的 EventLog（每次运行一个独立 JSONL 文件）
 
         Returns:
-            RunResult，包含最终状态和统计信息
+            RunResult，包含最终状态、步数、token 消耗、git diff patch
         """
+        # ── 初始化阶段 ────────────────────────────────────────────────
+        # 记录 repo_path，供 _build_messages（system prompt 中的 repo 路径）
+        # 和 _get_git_diff（git diff HEAD）使用
         self._current_repo_path = task.repo_path
-        # 按 repo_path 隔离 repo_map 缓存，换 repo 时自动重建
+        # 按 repo_path 隔离 repo_map 缓存，换 repo 时自动重建。
+        # _repo_map_cache_key 与当前 task.repo_path 比较，
+        # 不一致时删除缓存，下次 _build_messages 时重新构建。
         cache_key = task.repo_path
         if getattr(self, "_repo_map_cache_key", None) != cache_key:
             if hasattr(self, "_repo_map_cache"):
@@ -113,32 +180,46 @@ class Agent:
         log.log_task_start(task)
         logger.info("Agent starting task %s", task.task_id)
 
-        # 初始化上下文管理器
-        # 如果调用方（ChatSession）注入了共享 history，直接复用；
-        # 否则新建（单次 run 模式）
+        # 初始化对话历史：
+        # - ChatSession 模式：_pending_history 非空 → 复用共享历史（跨轮续接）
+        # - 单次 run 模式：创建新 ConversationHistory，任务描述作为首条 user 消息
         if hasattr(self, "_pending_history") and self._pending_history is not None:
             history = self._pending_history
         else:
             history = ConversationHistory(max_messages=self._cfg.history_max_messages)
-            # 单次模式：把任务描述作为第一条 user 消息
             from agent.prompt import build_task_prompt
             history.add(LLMMessage(
                 role="user",
                 content=build_task_prompt(task.description, task.repo_path, task.issue_url),
             ))
+        # TokenBudget：从总预算算出各部分配额（default_plan()），
+        # 在 _build_messages 中用 trim_history() 做 Token 维度的第二层裁剪
         token_budget = TokenBudget(total=self._cfg.budget_tokens)
+        # RepoMap：扫描 repo 提取符号，生成摘要字符串。
+        # 实际 build(budget) 在 _build_messages() 中仅在第一步执行，后续复用缓存
         repo_map = RepoMap(task.repo_path)
 
+        # ── ReAct 主循环计数器 ──────────────────────────────────────
+        # 总 token 消耗（累加每次 LLMResponse.total_tokens）
         total_tokens = 0
+        # 连续无文件编辑步数（触发 Reflection B：steps_without_edit >= 6）
         steps_without_edit = 0
 
+        # ═══════════════════════════════════════════════════════════════════
+        # ReAct 循环体（Observe → Think → Act）
+        # for 循环上限为 task.max_steps（默认 40），超出返回 MAX_STEPS。
+        # 每轮迭代：组装消息 → LLM 推理 → 解析 Action → 执行/终止
+        # ═══════════════════════════════════════════════════════════════════
         for step in range(1, task.max_steps + 1):
             logger.debug("Step %d/%d", step, task.max_steps)
 
-            # ── 1. 组装 messages，调用 LLM ──────────────────────────────
+            # ── 阶段 1：上下文组装 ────────────────────────────────────
+            # _build_messages = system prompt（含 repo-map 摘要）+ 裁剪后的 history
+            # _registry.get_schemas = 12 个工具的 JSON Schema
             messages = self._build_messages(history, token_budget, repo_map)
             tools = self._registry.get_schemas()
 
+            # ── 阶段 2：LLM 推理（带重试） ──────────────────────────
             try:
                 response = self._call_with_retry(messages, tools)
             except Exception as exc:
@@ -156,11 +237,15 @@ class Agent:
             total_tokens += response.total_tokens
             action = response.action
 
-            # ── 2. 写入 Action event ────────────────────────────────────
+            # ── 阶段 2b：Action 写入 EventLog ───────────────────────
+            # 记录 LLM 的完整原文（raw_content：含 thought + tool_call/message）
             log.log_action(step=step, action=action, raw_content=response.raw_content)
             logger.info("Step %d: %r", step, action)
 
-            # ── 3. 检测死循环（连续相同 action）────────────────────────
+            # ── 环节 A：死循环检测（第一种熔断） ─────────────────────
+            # 比较最近 N 条 Action 的 (tool_name, params) 元组。
+            # 元组完全一致 → 死循环 → 返回 GAVE_UP。
+            # 对应 resume "结合连续相同 Action 死循环检测实现三种自动熔断策略"
             if self._is_looping(log):
                 reason = f"Loop detected: same action repeated {self._cfg.loop_detection_window} times"
                 logger.warning(reason)
@@ -173,7 +258,9 @@ class Agent:
                     total_tokens=total_tokens,
                 )
 
-            # ── 4. 终止 action ──────────────────────────────────────────
+            # ── 环节 B：终止 Action 判断 ─────────────────────────────
+            # LLM 正常返回 FINISH → 提取 git diff patch → 返回 SUCCESS
+            # 对应简历"替代黑盒式 AgentExecutor"——终止逻辑显式在循环中判断
             if action.action_type == ActionType.FINISH:
                 summary = action.message or "Task complete."
                 patch = self._get_git_diff(task.repo_path)
@@ -187,6 +274,7 @@ class Agent:
                     patch=patch,
                 )
 
+            # LLM 主动放弃 → 记录失败原因 → 返回 GAVE_UP
             if action.action_type == ActionType.GIVE_UP:
                 reason = action.message or "Agent gave up."
                 log.log_task_failed(steps=step, reason=reason)
@@ -198,21 +286,53 @@ class Agent:
                     total_tokens=total_tokens,
                 )
 
-            # ── 5. 执行工具 ─────────────────────────────────────────────
+            # ── 环节 C：TOOL_CALL — 执行工具 + 回写 + Reflection ──
             if action.action_type == ActionType.TOOL_CALL and action.tool_call:
                 tc = action.tool_call
+
+                # [拦截] 部分模型（DeepSeek 等）把 "call finish" 当作 function calling
+                # 目标，返回 tool_name="finish" 而非 finish_reason="stop"。
+                # 此处拦截并转换为正确的终端 Action。
+                if tc.name == "finish":
+                    summary = str(tc.params.get("summary", "") or action.thought or "Task complete.")
+                    patch = self._get_git_diff(task.repo_path)
+                    log.log_task_complete(steps=step, summary=summary)
+                    return RunResult(
+                        task_id=task.task_id, status=RunStatus.SUCCESS,
+                        summary=summary, steps_taken=step,
+                        total_tokens=total_tokens, patch=patch,
+                    )
+                if tc.name == "give_up":
+                    reason = str(tc.params.get("reason", "") or action.thought or "Agent gave up.")
+                    log.log_task_failed(steps=step, reason=reason)
+                    return RunResult(
+                        task_id=task.task_id, status=RunStatus.GAVE_UP,
+                        summary=reason, steps_taken=step,
+                        total_tokens=total_tokens,
+                    )
+
+                # ── 阶段 3：Tool Calling ──
+                # 通过 ToolRegistry 查找并执行工具。
+                # 工具不存在时返回 error ToolResult（不抛异常），Agent 继续运行。
+                # ToolResult → Observation：包装为 Agent 标准格式
                 result = self._registry.execute_tool(tc.name, tc.params)
                 observation = result.to_observation(tc.name)
 
-                # 追踪是否有文件写操作
+                # 追踪文件编辑步数：
+                # file_write/file_edit/edit → 重置计数器
+                # 其他工具（shell/read/search/git/test）→ 累加
                 if tc.name in ("file_write", "file_edit", "edit"):
                     steps_without_edit = 0
                 else:
                     steps_without_edit += 1
 
+                # 写入 Observation event 到 EventLog
                 log.log_observation(step=step, observation=observation)
 
-                # 把 action 和 observation 加入对话历史
+                # ── 阶段 4：结果回写 ──
+                # Action 格式化为 assistant 消息（thought + tool_call params）
+                # Observation 格式化为 user 消息（tool name + status + output）
+                # 下一轮 LLM 调用时看到 history：上一步的 (Action, Observation) 对
                 history.add(LLMMessage(
                     role="assistant",
                     content=self._format_action_for_history(action),
@@ -222,9 +342,12 @@ class Agent:
                     content=self._format_observation_for_history(observation),
                 ))
 
-                # ── 6. Reflection 触发判断 ──────────────────────────────
+                # ── 环节 D：Reflection 自省判断 ────────────────────
+                # 对应 resume "双重 Reflection 自省机制"。
+                # 不是暴力重试，而是注入引导性元认知 prompt。
 
-                # 触发条件 A：测试工具失败
+                # 触发条件 A：测试失败 → 注入 REFLECTION_TEST_FAILED
+                # 引导 LLM：(1) 读错误信息 (2) 反思最近编辑 (3) 确认是否需要更多上下文
                 if (
                     tc.name in self._cfg.test_tool_names
                     and not observation.is_success()
@@ -238,7 +361,8 @@ class Agent:
                     history.add(LLMMessage(role="user", content=reflect_prompt))
                     logger.debug("Reflection triggered: test_failed at step %d", step)
 
-                # 触发条件 B：连续 N 步无编辑
+                # 触发条件 B：连续 N 步无编辑 → 注入 REFLECTION_NO_EDIT
+                # 防止无尽探索：追问"有足够上下文了吗？有→动手改；没有→精确说出缺什么"
                 elif steps_without_edit >= self._cfg.reflection_no_edit_steps:
                     reflect_prompt = reflection_no_edit(steps_without_edit)
                     log.log_reflection(
@@ -250,14 +374,17 @@ class Agent:
                     steps_without_edit = 0  # 重置计数，避免每步都触发
                     logger.debug("Reflection triggered: no_edit at step %d", step)
 
+            # REFLECTION action type（预留）：LLM 主动反思。
+            # 当前所有 Reflection 都由 core.py 代码注入（不是 LLM 主动返回的）
             elif action.action_type == ActionType.REFLECTION:
-                # LLM 主动要求 reflection（预留，当前 MockBackend 不产生）
                 history.add(LLMMessage(
                     role="assistant",
                     content=action.thought,
                 ))
 
-        # ── 7. 超出步数上限 ─────────────────────────────────────────────
+        # ── 环节 E：步数上限熔断（第三种熔断策略） ──────────────────
+        # for 循环自然结束（step > task.max_steps）→ 返回 MAX_STEPS。
+        # 这是最基础的硬截断——前两种 Reflection 没触发时仍保证系统不无限循环。
         reason = f"Reached max_steps limit ({task.max_steps})"
         log.log_task_failed(steps=task.max_steps, reason=reason)
         return RunResult(
@@ -268,9 +395,10 @@ class Agent:
             total_tokens=total_tokens,
         )
 
-    # ------------------------------------------------------------------
-    # 内部辅助
-    # ------------------------------------------------------------------
+    # ==================================================================
+    # 内部辅助方法
+    # 以下方法由 run() 在 ReAct 循环各阶段调用，不对外暴露。
+    # ==================================================================
 
     def _build_messages(
         self,
@@ -280,35 +408,46 @@ class Agent:
     ) -> list[LLMMessage]:
         """
         组装发给 LLM 的完整 messages，含 token 裁剪。
+
+        这是 ReAct + Repo-map 融合的关键点（对应简历第二段）。
+        组装后的 messages 结构：
+          [0] system prompt（含工具列表 + repo-map 摘要）
+          [1..N] 裁剪后的对话历史（首条任务描述保留 + 最近 N 条消息）
         """
         schemas = self._registry.get_schemas()
 
-        # 生成 repo-map（带缓存：只在第一步生成，之后复用）
+        # 生成 repo-map（带缓存：只在第一步生成，之后复用）。
+        # 缓存策略：同一次 run() 内只构建一次，跨 repo 切换自动失效。
         if not hasattr(self, "_repo_map_cache"):
             self._repo_map_cache = repo_map.build(
                 budget=token_budget.default_plan().repo_map
             )
 
+        # 渲染 system prompt：将 repo-map 摘要注入 {repo_summary} 占位符
         system_content = build_system_prompt(
             repo_path=getattr(self, "_current_repo_path", "."),
             tools=schemas,
             repo_summary=self._repo_map_cache,
         )
 
-        # 裁剪历史
+        # 第二层裁剪（Token 维度）：从最新到最旧贪婪选择，保留首条，丢弃插入提示。
+        # 第一层已由 ConversationHistory 滑动窗口完成（条数维度）。
         trimmed_history_dicts = token_budget.trim_history(
             history.to_dicts(),
             token_budget.default_plan().history,
         )
 
-        # 组装：system + 裁剪后的 history
+        # 组装完整 messages：system 放在第 0 位（永不裁剪）→ 裁剪后的 history
         messages = [LLMMessage(role="system", content=system_content)]
         for d in trimmed_history_dicts:
             messages.append(LLMMessage(role=d["role"], content=d["content"]))
         return messages
 
     def _format_action_for_history(self, action: Action) -> str:
-        """把 Action 格式化为 assistant 消息，写入对话历史。"""
+        """
+        把 Action 格式化为 assistant 消息，写入对话历史。
+        下一轮 LLM 会看到："上次我做了什么决策"。
+        """
         parts = [f"Thought: {action.thought}"]
         if action.tool_call:
             parts.append(f"Action: {action.tool_call.name}")
@@ -318,7 +457,10 @@ class Agent:
         return "\n".join(parts)
 
     def _format_observation_for_history(self, observation: Observation) -> str:
-        """把 Observation 格式化为 user 消息，写入对话历史。"""
+        """
+        把 Observation 格式化为 user 消息，写入对话历史。
+        下一轮 LLM 会看到："上次我调用工具后，看到了什么结果"。
+        """
         status = "SUCCESS" if observation.is_success() else "ERROR"
         lines = [f"[Tool: {observation.tool_name} | {status}]"]
         if observation.output:
@@ -330,7 +472,9 @@ class Agent:
     def _is_looping(self, log: EventLog) -> bool:
         """
         检测是否陷入死循环：最近 N 条 action 完全相同。
-        比较 (tool_name, params) 元组。
+        比较 (tool_name, params) 元组（非字符串比较，区分"同工具不同参数"和"完全重复"）。
+
+        对应简历"连续相同 Action 死循环检测（滑动窗口比对 tool+params 元组）"。
         """
         n = self._cfg.loop_detection_window
         actions = log.get_actions()
@@ -338,7 +482,7 @@ class Agent:
             return False
 
         recent = actions[-n:]
-        # 只对 TOOL_CALL 类型做检测
+        # 只对 TOOL_CALL 类型做检测（FINISH/GIVE_UP 无需检测）
         if not all(a.action_type == ActionType.TOOL_CALL for a in recent):
             return False
         if not all(a.tool_call for a in recent):
@@ -357,8 +501,9 @@ class Agent:
     ):
         """
         带指数退避重试的 LLM 调用。
-        stream=True 时走 backend.stream()，否则走 complete()。
-        不重试：认证失败（401/403）、参数错误（400）。
+        stream=True → 走 backend.stream()（边收 token 边实时打印）
+        stream=False → 走 backend.complete()（一次性返回）
+        不重试：401/403（认证失败）、400（参数错误）——这些重试也没用。
         """
         import time as _time
 
@@ -380,11 +525,13 @@ class Agent:
             except Exception as exc:
                 last_exc = exc
                 exc_str = str(exc).lower()
+                # 认证/参数错误不重试，立即抛出（让上层快速失败）
                 if any(kw in exc_str for kw in (
                     "401", "403", "invalid api key", "authentication",
                     "400", "bad request",
                 )):
                     raise
+                # 网络/超时/服务端错误 → 指数退避重试
                 if attempt < self._cfg.llm_max_retries:
                     logger.warning(
                         "LLM call failed (attempt %d/%d): %s — retrying in %.1fs",
@@ -396,12 +543,16 @@ class Agent:
         raise last_exc  # type: ignore[misc]
 
     def _get_git_diff(self, repo_path: str) -> str | None:
-        """抓取 git diff HEAD 作为 patch，失败时静默返回 None。"""
+        """
+        抓取 git diff HEAD 作为 patch，失败时静默返回 None。
+        FINISH action 处理时调用（第 179 行、210 行）。
+        RunResult.patch 字段包含此 diff，调用方（如 GitHub Issue 入口）可将其作为 PR 代码变更。
+        """
         import subprocess
         try:
             proc = subprocess.run(
                 ["git", "diff", "HEAD"],
-                capture_output=True, text=True, timeout=10, cwd=repo_path,
+                capture_output=True, encoding="utf-8", errors="replace", timeout=10, cwd=repo_path,
             )
             diff = proc.stdout.strip()
             return diff if diff else None

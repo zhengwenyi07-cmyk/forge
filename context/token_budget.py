@@ -24,25 +24,47 @@ tiktoken 不可用时自动降级为字符估算（1 token ≈ 4 chars），精�
   3. repo_map      repo 摘要，超出时缩减
   4. recent_obs    最近 observation，永不裁剪
   5. history       历史对话，从最旧开始裁剪
+
+数据流（对应简历第三段"基于优先级的 Token 预算分配器" + "双层裁剪"）：
+  core.py:_build_messages()
+    → token_budget = TokenBudget(total=budget_tokens)      ← 初始化（总预算）
+    → plan = token_budget.default_plan()                    ← 算分配比例
+    → token_budget.trim_history(history, plan.history)      ← 第二层裁剪：按 Token 数量
+    → 第一层裁剪已在 ConversationHistory._trim() 完成       ← 第一层裁剪：按消息条数
+
+  usage_report() → 输出各部分的 token 使用量
+    → 用于调试和配置调优
 """
 
 from __future__ import annotations
 
+# dataclass：
+#   BudgetPlan(total, system_core, repo_map, history, observation, reserve)
+#   一个不可变的预算分配方案，由 default_plan() 生成
 from dataclasses import dataclass
 
-# ---------------------------------------------------------------------------
+# ===========================================================================
 # Token 计数：优先 tiktoken，失败时字符估算 fallback
-# ---------------------------------------------------------------------------
+# 对应简历"优先使用 tiktoken 精确计数，环境受限时降级为字符数 // 4 估算"
+# ===========================================================================
 
-_tiktoken_enc = None
-_tiktoken_available = False
+# 全局状态：tiktoken 编码器和可用性标记
+# 首次调用 estimate_tokens() 时懒初始化，之后缓存
+_tiktoken_enc = None          # tiktoken.Encoding 对象或 None
+_tiktoken_available = False    # tiktoken 是否已成功加载
 
 def _init_tiktoken() -> None:
+    """
+    尝试加载 tiktoken 的 cl100k_base 编码器。
+    网络或安装问题导致失败时静默降级（_tiktoken_available = False）。
+    编码器缓存在全局变量 _tiktoken_enc 中，整个进程生命周期内只加载一次。
+    """
     global _tiktoken_enc, _tiktoken_available
     if _tiktoken_available or _tiktoken_enc is not None:
         return
     try:
         import tiktoken
+        # cl100k_base 编码器是 OpenAI 官方编码器，兼容 GPT-4/3.5 及大多数现代模型
         _tiktoken_enc = tiktoken.get_encoding("cl100k_base")
         _tiktoken_available = True
     except Exception:
@@ -54,6 +76,11 @@ def estimate_tokens(text: str) -> int:
     """
     估算文本的 token 数。
     优先使用 tiktoken（精确），不可用时用字符数 // 4（误差 <15%）。
+
+    对应简历"优先使用 tiktoken 的 cl100k_base 编码做精确计数，
+    环境受限时自动降级为字符数 // 4 估算（误差 <15%）"。
+
+    返回至少 1（即使是空字符串也返回 1），防止除零错误。
     """
     if not _tiktoken_available:
         _init_tiktoken()
@@ -64,7 +91,9 @@ def estimate_tokens(text: str) -> int:
         except Exception:
             pass
 
-    # 字符估算 fallback
+    # 字符估算 fallback：假设 1 token ≈ 4 个字符
+    # 这个比例对不同语言有差异（英文更接近 4，中文更接近 2），
+    # 但对于 Token 预算控制这种粗粒度任务，误差 <15%，完全可接受
     return max(1, len(text) // 4)
 
 
@@ -79,28 +108,48 @@ def is_tiktoken_available() -> bool:
     return _tiktoken_available
 
 
-# ---------------------------------------------------------------------------
-# BudgetPlan
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# BudgetPlan — 各部分的 token 配额计划
+# 一个不可变的数据容器，由 TokenBudget.default_plan() 生成。
+# 不对实际分配进行校验，只做数值封送。
+# ===========================================================================
 
 @dataclass
 class BudgetPlan:
-    """各部分的 token 配额计划。"""
-    total: int
-    system_core: int
-    repo_map: int
-    history: int
-    observation: int
-    reserve: int
+    """
+    各部分的 token 配额计划。
+
+    各部分优先级（从高到低）：
+    1. system_core：系统指令，永不裁剪（但限制预算以防 write 时超出总窗口）
+    2. repo_map：仓库摘要，超出时缩减文件数量
+    3. history：对话历史，从最旧开始裁剪
+    4. observation：最近的工具执行结果，截断单条超长输出
+    5. reserve：安全预留，不分配到任何具体部分
+
+    对应简历："System 10% → Repo-map 15% → History 50% → Observation 25%"
+    """
+    total: int          # 总预算（从 config/default.yaml 的 agent.budget_tokens 读取，默认 80_000）
+    system_core: int    # System Prompt 预算（可用预算的 10%）
+    repo_map: int       # Repo-map 摘要预算（可用预算的 15%）
+    history: int        # 对话历史预算（可用预算的 50%，最大份额）
+    observation: int    # 最近 Observation 预算（可用预算的 25%）
+    reserve: int        # 安全预留（总预算的 15%）
 
     @property
     def available(self) -> int:
+        """可用预算 = 总预算 - 安全预留。"""
         return self.total - self.reserve
 
 
-# ---------------------------------------------------------------------------
-# TokenBudget
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# TokenBudget — Token 预算管理器
+# 核心方法：
+#   default_plan()     — 按优先级比例分配预算
+#   trim_to()          — 单条文本按 token 上限裁剪
+#   trim_history()     — 历史消息列表按 token 上限裁剪（保留首条 + 最近消息）
+#   fit_all()          — 一次性裁剪所有部分（便捷方法，当前未被 core.py 调用）
+#   usage_report()     — 输出各部分的 token 使用量（诊断用）
+# ===========================================================================
 
 class TokenBudget:
     """
@@ -117,6 +166,19 @@ class TokenBudget:
         self._total = total
 
     def default_plan(self) -> BudgetPlan:
+        """
+        生成默认的预算分配方案。
+
+        分配逻辑：
+        1. 总预算 → 15% 预留（缓冲余量）
+        2. 剩余可用预算 → 按 10% / 15% / 50% / 25% 分配给四部分
+
+        比例设计思路：
+        - History 最大（50%）— 多轮对话中最占 token 的就是历史消息
+        - Observation 次大（25%）— 工具输出可能很长（如 file_read 结果）
+        - Repo-map 适中（15%）— 全仓库摘要，控制注入量
+        - System 最小（10%）— 固定指令文本，占比不高但优先级最高
+        """
         total = self._total
         reserve = int(total * 0.15)
         available = total - reserve
@@ -130,7 +192,22 @@ class TokenBudget:
         )
 
     def trim_to(self, text: str, token_limit: int) -> str:
-        """裁剪文本到 token_limit 以内，超出时保留开头。"""
+        """
+        裁剪文本到 token_limit 以内，超出时保留开头。
+        用于裁剪单条超长文本（如 repo-map 摘要、超长 observation）。
+
+        算法：二分逼近
+        1. 先用 token_limit * 4 作为字符预算截断
+        2. 如果截断后 token 数仍超标，每次缩 10%，反复逼近
+        3. 在末尾插入被截断的 token 数提示
+
+        Args:
+            text:        待裁剪文本
+            token_limit: token 上限
+
+        Returns:
+            裁剪后的文本（如果原文本不超过限制则原样返回）
+        """
         if estimate_tokens(text) <= token_limit:
             return text
         # 二分逼近：找到合适的字符截断点
@@ -149,6 +226,20 @@ class TokenBudget:
         """
         裁剪历史消息列表到 token_limit 以内。
         保留第一条（任务描述）+ 尽量多的最近消息。
+
+        这是"双层裁剪"的第二层（Token 数量维度）。
+        第一层由 ConversationHistory._trim() 完成（消息条数维度，保留首条 + 最近 N 条）。
+        第二层在此进行（Token 维度，从最新消息开始贪婪选择直到预算耗尽）。
+
+        对应简历"结合 ConversationHistory 滑动窗口与 TokenBudget 二分截断实现双层裁剪"：
+        - 第一层（条数）：ConversationHistory._trim() — 从 index 1 弹出旧消息
+        - 第二层（Token）：trim_history() — 从最新消息贪婪选择，丢弃的插入截断提示
+
+        算法：从最新到最旧贪婪选择
+        - 保留第一条（0-index）不变（任务描述，永久保留）
+        - 从最后一条开始向前遍历（reversed），每条加入 selected 列表
+        - 如果当前消息 token 数 > 剩余预算 → 跳过并不再继续（因为更旧的消息更大）
+        - 被丢弃的消息数记录到一条截断提示消息中
         """
         if not messages:
             return messages
@@ -190,6 +281,22 @@ class TokenBudget:
         history: list[dict],
         observation_text: str,
     ) -> tuple[str, str, list[dict], str]:
+        """
+        一次性裁剪所有部分（便捷方法）。
+        按 default_plan() 分配预算，分别裁剪各部分。
+
+        Args:
+            system_text:     System Prompt 文本
+            repo_map_text:   Repo-map 摘要文本
+            history:         对话历史消息列表
+            observation_text: 最新 Observation 文本
+
+        Returns:
+            (trimmed_system, trimmed_map, trimmed_history, trimmed_obs)
+
+        注意：当前 core.py 中未调用此方法，而是分别调用 trim_to() 和 trim_history()。
+        此方法预留作为 future 统一入口。
+        """
         plan = self.default_plan()
         trimmed_system = self.trim_to(system_text, plan.system_core)
         trimmed_map = self.trim_to(repo_map_text, plan.repo_map)
@@ -204,6 +311,25 @@ class TokenBudget:
         history: list[dict],
         observation_text: str,
     ) -> dict[str, int]:
+        """
+        生成 token 使用量报告（诊断用）。
+
+        返回各部分的 token 估算值和总预算，帮助判断是否需要调整配置比例。
+
+        Args:
+            system_text:     System Prompt 文本
+            repo_map_text:   Repo-map 摘要文本
+            history:         对话历史消息列表
+            observation_text: 最新 Observation 文本
+
+        Returns:
+            dict 包含：system / repo_map / history / observation / total / budget / tiktoken_used
+
+        输出示例：
+            {"system": 6800, "repo_map": 10200, "history": 34000,
+             "observation": 17000, "total": 68000, "budget": 80000,
+             "tiktoken_used": True}
+        """
         history_tokens = sum(
             estimate_tokens(m.get("content", "")) for m in history
         )

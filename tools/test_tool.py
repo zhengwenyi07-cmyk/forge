@@ -80,7 +80,13 @@ class PytestTool(BaseTool):
             if (cwd_path / "tests").exists():
                 test_path = "tests/"
             else:
-                test_path = "."
+                # 没有 tests/ 目录时不要扫全项目（会触发无关文件的 collection 错误）
+                return ToolResult(
+                    success=False,
+                    output="",
+                    error="No tests/ directory found in this repository. "
+                          "Specify a test file path explicitly (e.g. tests/test_foo.py).",
+                )
 
         extra_args = params.get("args", "")
 

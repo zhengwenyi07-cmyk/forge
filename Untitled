@@ -1,0 +1,1 @@
+pytest -v --tb=line 2>&1 | findstr /C:"passed" /C:"failed" /C:"skipped"

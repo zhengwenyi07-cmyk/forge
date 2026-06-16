@@ -133,7 +133,7 @@ class LocalRuntime(Runtime):
                 cmd,
                 shell=True,
                 capture_output=True,
-                text=True,
+                encoding="utf-8", errors="replace",
                 timeout=timeout,
                 cwd=cwd,
             )
@@ -162,6 +162,17 @@ SANDBOX_IMAGE = "python:3.11-slim"
 
 # 容器内 repo 的挂载路径
 CONTAINER_WORKDIR = "/workspace"
+
+# 默认初始化命令：容器启动后自动安装工具依赖
+# 让沙箱"注入工具"的环节真正生效：
+#   - apt-get git → GitTool 的 git_status/git_diff/git_add/git_commit 可以工作
+#   - pip install pytest → PytestTool 可以运行测试
+#   - -qq / -q 静默安装，减少日志噪音
+#   用户可以通过 DockerRuntime(setup_cmds=...) 自定义覆盖
+DEFAULT_SETUP_CMDS = [
+    "apt-get update -qq && apt-get install -y -qq --no-install-recommends git",
+    "pip install -q pytest",
+]
 
 
 class DockerRuntime(Runtime):
@@ -195,6 +206,10 @@ class DockerRuntime(Runtime):
         self._extra_mounts = extra_mounts or []
         self._setup_cmds = setup_cmds or []
         self._container_id: str | None = None
+        self._allow_network: bool = False
+        # 默认 setup 完成后断网（安全隔离）
+        # 创建者如果希望始终保持网络，可以设为 False
+        self._disconnect_after_setup: bool = True
         # 容器名加随机后缀，避免冲突
         self._container_name = f"coding-agent-sandbox-{uuid.uuid4().hex[:8]}"
 
@@ -232,7 +247,9 @@ class DockerRuntime(Runtime):
             # 如果 cwd 是宿主机路径，转换为容器内路径
             host_cwd = str(Path(cwd).resolve())
             if host_cwd.startswith(self._repo_path):
-                relative = host_cwd[len(self._repo_path):].lstrip("/")
+                relative = host_cwd[len(self._repo_path):].lstrip("/\\")
+                # 确保使用正斜杠（容器内是 Linux）
+                relative = relative.replace("\\", "/")
                 container_cwd = f"{CONTAINER_WORKDIR}/{relative}" if relative else CONTAINER_WORKDIR
             else:
                 container_cwd = cwd   # 可能是容器内的绝对路径
@@ -250,7 +267,7 @@ class DockerRuntime(Runtime):
             proc = subprocess.run(
                 docker_cmd,
                 capture_output=True,
-                text=True,
+                encoding="utf-8", errors="replace",
                 timeout=timeout + 5,   # docker exec 本身有少量开销
             )
             return RunResult(
@@ -319,8 +336,19 @@ class DockerRuntime(Runtime):
             "--rm",                                     # 停止时自动删除
             "-v", f"{self._repo_path}:{CONTAINER_WORKDIR}",  # mount repo
             "--workdir", CONTAINER_WORKDIR,
-            "--network", "none",                        # 默认断网，更安全
         ]
+
+        # 网络策略：默认断网更安全，但 setup_cmds 需要网络（apt-get/pip install）
+        # 创建时如果用户传了 setup_cmds 或显式设置了 _allow_network=True，就放行网络
+        if not self._allow_network:
+            run_args += ["--network", "none"]
+
+        # 补上 git 用户配置（避免容器内 git commit 报错 "Please tell me who you are"）
+        # 放在 setup_cmds 尾部（apt-get install git 已经先执行完了）
+        if any("git" in cmd for cmd in (self._setup_cmds or [])):
+            self._setup_cmds = list(self._setup_cmds or [])
+            self._setup_cmds.append("git config --global user.email 'agent@forge.dev'")
+            self._setup_cmds.append("git config --global user.name 'Forge Agent'")
 
         # 额外 mount
         for host_path, container_path in self._extra_mounts:
@@ -332,7 +360,7 @@ class DockerRuntime(Runtime):
             proc = subprocess.run(
                 run_args,
                 capture_output=True,
-                text=True,
+                encoding="utf-8", errors="replace",
                 timeout=60,  # 拉镜像可能需要时间
             )
         except subprocess.TimeoutExpired:
@@ -359,6 +387,18 @@ class DockerRuntime(Runtime):
                     "Setup command failed: %r\n%s", setup_cmd, result.stderr
                 )
 
+        # setup 完成后断网，恢复沙箱隔离
+        # 只有初始有网络（_allow_network=True）且设了 post-setup 断网时才执行
+        if self._allow_network and self._disconnect_after_setup:
+            try:
+                subprocess.run(
+                    ["docker", "network", "disconnect", "bridge", self._container_name],
+                    capture_output=True, timeout=10,
+                )
+                logger.info("Disconnected container from network (post-setup isolation)")
+            except Exception as e:
+                logger.warning("Failed to disconnect network after setup: %s", e)
+
         return None   # 成功
 
     def install_requirements(self, requirements_file: str = "requirements.txt") -> RunResult:
@@ -379,16 +419,19 @@ def create_runtime(
     sandbox: bool = False,
     repo_path: str | None = None,
     image: str = SANDBOX_IMAGE,
-    network: bool = False,
+    network: bool = True,
+    setup_cmds: list[str] | None = None,
 ) -> Runtime:
     """
     根据配置创建合适的 Runtime。
 
     Args:
-        sandbox:   True 则创建 DockerRuntime，False 则 LocalRuntime
-        repo_path: sandbox=True 时必须提供
-        image:     Docker 镜像名
-        network:   sandbox 模式下是否允许网络（默认 False，更安全）
+        sandbox:    True 则创建 DockerRuntime，False 则 LocalRuntime
+        repo_path:  sandbox=True 时必须提供
+        image:      Docker 镜像名
+        network:    sandbox 模式下是否允许网络（默认 True，因为 setup_cmds 需要网络安装依赖）
+        setup_cmds: 容器启动后执行的初始化命令。默认使用 DEFAULT_SETUP_CMDS 安装 git + pytest
+                   传 [] 或空列表则跳过初始化
 
     Returns:
         Runtime 实例
@@ -399,9 +442,15 @@ def create_runtime(
     if not repo_path:
         raise ValueError("repo_path is required when sandbox=True")
 
-    runtime = DockerRuntime(repo_path=repo_path, image=image)
+    if setup_cmds is None:
+        setup_cmds = list(DEFAULT_SETUP_CMDS)
+
+    runtime = DockerRuntime(
+        repo_path=repo_path,
+        image=image,
+        setup_cmds=setup_cmds,
+    )
     if network:
-        # 允许网络时去掉 --network none
-        runtime._allow_network = True  # DockerRuntime._start_container 检查此标志
+        runtime._allow_network = True
 
     return runtime

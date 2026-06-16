@@ -1,7 +1,7 @@
 llm:
   provider: deepseek
   model: deepseek-v4-flash # 或 deepseek-v4-pro
-  api_key: ${DEEPSEEK_API_KEY} # 在终端 export DEEPSEEK_API_KEY=你的key
+  api_key: sk-b89f3b56c72e43309c10425c13d73dfa # 在终端 export DEEPSEEK_API_KEY=你的key
   base_url: https://api.deepseek.com
   max_tokens: 8192
 

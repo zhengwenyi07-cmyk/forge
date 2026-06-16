@@ -519,6 +519,7 @@ agent run --task "src/parser.py 的 parse() 函数在输入空字符串时抛 Va
 ### 常见任务写法
 
 **修复 Bug：**
+
 ```
 tests/test_api.py::test_auth_token 报错 KeyError: 'user_id'。
 原因可能在 src/auth.py 的 verify_token() 函数里。
@@ -526,6 +527,7 @@ tests/test_api.py::test_auth_token 报错 KeyError: 'user_id'。
 ```
 
 **添加功能：**
+
 ```
 在 src/api.py 里添加 GET /api/v1/health 接口，
 返回 JSON：{"status": "ok", "version": "1.0.0", "timestamp": <当前UTC时间>}。
@@ -632,7 +634,7 @@ agent run --task "先运行 pip install -r requirements.txt，然后运行所有
 
 检查 GITHUB_TOKEN 是否有 `repo` 权限。如果只想修代码不提 PR：
 ```bash
-python -m entry.github_issue --repo owner/repo --issue 42 \
+tyytpython -m entry.github_issue --repo owner/repo --issue 42 \
     --local-path /tmp/myrepo --no-pr
 ```
 

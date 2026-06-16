@@ -219,16 +219,20 @@ def _parse_openai_response(choice: Any, thought: str) -> Action:
         )
 
     if finish_reason == "stop":
+        # 模型有内容输出 → 作为最终回答
         if thought and thought != "(no thought)":
             return Action(
                 action_type=ActionType.FINISH,
-                thought="",      # 普通 chat 模型没有独立推理链，thought 置空
-                message=thought,  # 模型输出的内容就是最终回答
+                thought="",
+                message=thought,
             )
+        # 模型没输出内容但正常结束了——任务已由前面的工具调用完成
+        # 例如 find_files 返回了结果，模型觉得不需要额外的话
+        # 这种情况应视为完成而非放弃
         return Action(
-            action_type=ActionType.GIVE_UP,
-            thought=thought,
-            message="Model stopped with no content",
+            action_type=ActionType.FINISH,
+            thought="",
+            message="Task complete.",
         )
 
     # length（token 超限）或其他

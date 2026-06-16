@@ -187,10 +187,11 @@ def _parse_anthropic_response(response: Any) -> Action:
                 thought=thought,
                 message=thought,
             )
+        # 模型正常结束但没内容——视为完成（任务已由工具调用完成）
         return Action(
-            action_type=ActionType.GIVE_UP,
-            thought=thought,
-            message="Model ended turn with no content",
+            action_type=ActionType.FINISH,
+            thought="",
+            message="Task complete.",
         )
 
     # max_tokens 或其他 stop_reason
