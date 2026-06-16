@@ -68,7 +68,7 @@ def _get_github_client():
     Token 创建地址：https://github.com/settings/tokens
     """
     try:
-        from github import Github
+        from github import Github, Auth
     except ImportError:
         raise ImportError("PyGithub not installed. Run: pip install PyGithub")
 
@@ -78,7 +78,7 @@ def _get_github_client():
             "GITHUB_TOKEN environment variable is not set.\n"
             "Create a token at https://github.com/settings/tokens"
         )
-    return Github(token)
+    return Github(auth=Auth.Token(token))
 
 
 def fetch_issue(repo_name: str, issue_number: int) -> tuple[str, str, str]:
@@ -353,7 +353,20 @@ def run_on_issue(
         click.echo(f"  Agent did not complete the task.", err=True)
         return 1
 
-    # ── 步骤 6：Push 分支 ────────────────────────────────────────────
+    # ── 步骤 6：自动提交 ─────────────────────────────────────────────
+    # agent 可能改了文件但没 git commit，这里统一提交。
+    _run_git(["add", "-A"], cwd=local_path)
+    ok, out = _run_git(
+        ["commit", "--no-verify", "-m", f"[Agent] Fix issue #{issue_number}: {title}"],
+        cwd=local_path,
+    )
+    if ok:
+        click.echo(f"  Committed: Fix issue #{issue_number}: {title}")
+    else:
+        # 可能 nothing to commit（改了但没内容变化），不影响后续
+        click.echo(f"  Commit: {out}")
+
+    # ── 步骤 7：Push 分支 ────────────────────────────────────────────
     # 推送 agent 的修改到 GitHub。
     # push 失败时不阻断整个流程——修改已在本地，用户可手动 push。
     if create_pr:
@@ -365,7 +378,7 @@ def run_on_issue(
             click.echo("Changes are committed locally. Push manually to create a PR.")
             return 0
 
-        # ── 步骤 7：创建 PR ──────────────────────────────────────────
+        # ── 步骤 8：创建 PR ──────────────────────────────────────────
         # PR 标题和描述自动生成：
         # 标题："[Agent] Fix issue #{number}: {title}"
         # 描述："Fixes #{number}" + result.summary + 任务描述前 500 字符
