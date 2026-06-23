@@ -114,6 +114,16 @@ pytest -v --tb=line 2>&1 | findstr /C:"passed" /C:"failed" /C:"skipped"
 
 **期望看到**：`376 passed, 7 skipped in ~20s`
 
+一条条测试
+
+```
+pytest --tb=line --cache-clear
+```
+
+
+
+
+
 **验证了什么**：
 - ✅ 简历第 3 段「376 个测试在约 20 秒内覆盖 Agent 全部 6 种终止路径、2 种 Reflection 触发条件」
 - ✅ `MockBackend` 以预设 Action 脚本替代真实 LLM，零网络零延迟

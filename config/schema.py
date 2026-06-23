@@ -39,10 +39,8 @@ from pathlib import Path
 # Any：_parse() 接收 dict[str, Any]，因为 yaml.safe_load 的返回类型不确定
 from typing import Any
 
-# yaml：读取 YAML 格式的配置文件。
-# yaml.safe_load(raw) 将 YAML 字符串解析为 Python dict。
-# 如果安装了更快的 libyaml（C 扩展），PyYAML 会自动使用 C 解析器
-import yaml
+# yaml：读取 YAML 格式的配置文件（懒加载，无此依赖时也可 import）
+# 如果未安装 PyYAML，load_config() 会给出清晰提示
 
 
 # ===========================================================================
@@ -63,6 +61,7 @@ class LLMConfig:
     api_key: str = ""                    # API Key。可在 yaml 中用 ${ENV_VAR} 占位符（如 ${DEEPSEEK_API_KEY}）
     base_url: str = ""                   # OpenAI-compatible 服务的基础 URL，anthropic 留空
     max_tokens: int = 4096               # 每次 LLM 调用的最大输出 token 数
+    headers: dict[str, str] | None = None  # 自定义 HTTP 请求头（如 MiMo Token Plan 的 api-key）
 
 
 @dataclass
@@ -189,7 +188,21 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         return AppConfig()
     raw = config_path.read_text(encoding="utf-8")
     raw = _expand_env(raw)
-    data: dict[str, Any] = yaml.safe_load(raw) or {}
+    try:
+        import yaml as _yaml
+    except ImportError:
+        try:
+            from ruamel.yaml import YAML
+            _yaml = YAML(typ="safe")
+            _yaml_ruamel = True
+        except ImportError:
+            raise ImportError(
+                "PyYAML is required to load config files. Install: pip install pyyaml"
+            )
+        else:
+            data: dict[str, Any] = _yaml.load(raw) or {}
+    else:
+        data: dict[str, Any] = _yaml.safe_load(raw) or {}
     return _parse(data)
 
 
@@ -219,6 +232,7 @@ def _parse(data: dict[str, Any]) -> AppConfig:
         api_key=llm_raw.get("api_key", ""),
         base_url=llm_raw.get("base_url", "") or "",
         max_tokens=int(llm_raw.get("max_tokens", 4096)),
+        headers=llm_raw.get("headers"),
     )
 
     agent = AgentCfg(

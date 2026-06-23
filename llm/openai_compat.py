@@ -49,10 +49,14 @@ class OpenAICompatBackend(LLMBackend):
         api_key: str,
         base_url: str | None = None,
         max_tokens: int = 4096,
+        headers: dict[str, str] | None = None,
     ) -> None:
         try:
             from openai import OpenAI
-            self._client = OpenAI(api_key=api_key, base_url=base_url)
+            kwargs = {"api_key": api_key, "base_url": base_url}
+            if headers:
+                kwargs["default_headers"] = headers
+            self._client = OpenAI(**kwargs)
         except ImportError:
             raise ImportError("openai package not installed. Run: pip install openai")
 

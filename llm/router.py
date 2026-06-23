@@ -44,6 +44,7 @@ def create_backend(
     api_key: str | None = None,
     base_url: str | None = None,
     max_tokens: int = 4096,
+    headers: dict[str, str] | None = None,
 ) -> LLMBackend:
     """
     工厂函数，根据 provider 创建对应的 LLMBackend。
@@ -87,6 +88,7 @@ def create_backend(
             model=model,
             api_key=resolved_key,
             max_tokens=max_tokens,
+            headers=headers,
         )
 
     # 所有 OpenAI-compatible providers
@@ -100,6 +102,7 @@ def create_backend(
         api_key=resolved_key,
         base_url=resolved_base_url,
         max_tokens=max_tokens,
+        headers=headers,
     )
 
 
@@ -120,4 +123,5 @@ def create_backend_from_config(config: dict) -> LLMBackend:
         api_key=config.get("api_key") or None,
         base_url=config.get("base_url") or None,
         max_tokens=int(config.get("max_tokens", 4096)),
+        headers=config.get("headers"),
     )

@@ -423,7 +423,7 @@ agent = Agent(backend, registry)  # ← 完全相同的 Agent 构造
 ### Git 的三个区域
 
 ```
-┌──────────────┐    git add    ┌──────────────┐   git commit   ┌──────────────┐
+┌──────────────┐    git add   ┌──────────────┐   git commit  ┌──────────────┐
 │   工作区      │  ──────────→ │   暂存区      │ ────────────→ │   本地仓库     │
 │  (Working    │              │  (Staging    │               │  (Local      │
 │   Directory) │              │   Area)      │               │   Repository)│
