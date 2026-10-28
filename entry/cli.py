@@ -87,20 +87,24 @@ def magenta(t: str) -> str: return _c(t, "35")   # 用户输入提示符
 #   runtime=DockerRuntime → 容器内执行（--sandbox）
 # ===========================================================================
 
-def _build_registry(cfg, confirm_callback=None, runtime=None):
+def _build_registry(cfg, confirm_callback=None, runtime=None,
+                    task_registry=None, backend=None, repo_path=None):
     """
     根据配置组装工具注册表。
 
-    注册的 12 个工具按职责分层（对应简历"12 个工具统一接口"）：
+    注册的工具按职责分层：
     探索层：   shell, search_text, find_files, find_symbol
     精读层：   file_read, file_view
     编辑层：   file_write
     验证层：   test（PytestTool）
     版本控制： git_status, git_diff, git_add, git_commit
+    多 Agent： task（TaskTool，需同时传入 task_registry + backend + repo_path）
 
     Args:
         runtime: 传 DockerRuntime 时所有工具走容器执行（沙箱模式）
-                 None 时全部在宿主机本地执行
+        task_registry: TaskRegistry 实例（启用 multi-agent 时传入）
+        backend: LLMBackend 实例（启用 multi-agent 时传入）
+        repo_path: repo 路径（启用 multi-agent 时传入）
     """
     from tools.base import ToolRegistry
     from tools.file_tool import FileReadTool, FileViewTool, FileWriteTool
@@ -109,7 +113,7 @@ def _build_registry(cfg, confirm_callback=None, runtime=None):
     from tools.shell_tool import ShellTool
     from tools.test_tool import PytestTool
 
-    return (
+    registry = (
         ToolRegistry()
         .register(ShellTool(confirm_callback=confirm_callback, runtime=runtime))
         .register(FileReadTool(runtime=runtime))
@@ -124,6 +128,19 @@ def _build_registry(cfg, confirm_callback=None, runtime=None):
         .register(GitAddTool(runtime=runtime))
         .register(GitCommitTool(runtime=runtime))
     )
+
+    # 注册 TaskTool（multi-agent 入口）
+    if task_registry and backend and repo_path:
+        from tools.task_tool import TaskTool
+        registry.register(TaskTool(
+            backend=backend,
+            registry=registry,
+            task_registry=task_registry,
+            repo_path=repo_path,
+            runtime=runtime,
+        ))
+
+    return registry
 
 
 def _print_step(event) -> None:
@@ -307,7 +324,13 @@ def run(
     runtime = create_runtime(sandbox=sandbox, repo_path=str(repo_path)) if sandbox else None
     if sandbox:
         click.echo(dim(f"  Sandbox: Docker ({runtime.name})"))
-    registry = _build_registry(config, confirm_callback=confirm_cb, runtime=runtime)
+
+    from multi_agent.task_registry import TaskRegistry
+    task_registry = TaskRegistry()
+    registry = _build_registry(
+        config, confirm_callback=confirm_cb, runtime=runtime,
+        task_registry=task_registry, backend=backend, repo_path=str(repo_path),
+    )
 
     from agent.core import Agent, AgentConfig
     from agent.event_log import EventLog, summarize_run
@@ -339,7 +362,7 @@ def run(
         confirm_dangerous=confirm,
         confirm_callback=confirm_cb,
     )
-    agent = Agent(backend, registry, agent_config)
+    agent = Agent(backend, registry, agent_config, task_registry=task_registry)
 
     task_obj = Task(
         description=description,
@@ -363,6 +386,10 @@ def run(
             for event in log.replay():
                 _print_step(event)
     finally:
+        # 确保所有子 Agent 被优雅终止（非 daemon 线程需显式 stop）
+        if task_registry.active_count() > 0:
+            click.echo(dim(f"  Stopping {task_registry.active_count()} sub-agent(s)..."))
+            task_registry.shutdown(timeout=5)
         if runtime:
             runtime.cleanup()
             click.echo(dim("  Sandbox cleaned up."))
@@ -451,10 +478,20 @@ def chat(
     registry = _build_registry(config)
     from tools.shell_tool import terminal_confirm
     from tools.runtime import create_runtime
+    from multi_agent.task_registry import TaskRegistry
+    task_registry = TaskRegistry()
     runtime = create_runtime(sandbox=sandbox, repo_path=str(repo_path)) if sandbox else None
     if sandbox:
         click.echo(dim(f"  Sandbox: Docker ({runtime.name})"))
-        registry = _build_registry(config, confirm_callback=terminal_confirm, runtime=runtime)
+        registry = _build_registry(
+            config, confirm_callback=terminal_confirm, runtime=runtime,
+            task_registry=task_registry, backend=backend, repo_path=str(repo_path),
+        )
+    else:
+        registry = _build_registry(
+            config, confirm_callback=terminal_confirm,
+            task_registry=task_registry, backend=backend, repo_path=str(repo_path),
+        )
     session = ChatSession(
         backend=backend,
         registry=registry,
@@ -462,6 +499,7 @@ def chat(
         repo_path="/workspace" if sandbox else str(repo_path),
         log_dir=config.agent.log_dir,
         confirm_callback=terminal_confirm,   # chat 模式默认开启确认
+        task_registry=task_registry,          # multi-agent 支持
     )
 
     # 欢迎信息
@@ -552,6 +590,10 @@ def chat(
                     traceback.print_exc()
 
     finally:
+        # 确保所有子 Agent 被优雅终止
+        if task_registry.active_count() > 0:
+            click.echo(dim(f"  Stopping {task_registry.active_count()} sub-agent(s)..."))
+            task_registry.shutdown(timeout=5)
         if runtime:
             runtime.cleanup()
             click.echo(dim("  Sandbox cleaned up."))

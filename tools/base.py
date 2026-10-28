@@ -156,6 +156,11 @@ class ToolRegistry:
         return [tool.to_llm_schema() for tool in self._tools.values()]
 
     @property
+    def tools(self) -> dict[str, "BaseTool"]:
+        """只读工具字典（供 multi_agent 构建子注册表）。"""
+        return dict(self._tools)
+
+    @property
     def tool_names(self) -> list[str]:
         return list(self._tools.keys())
 

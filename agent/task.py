@@ -109,6 +109,43 @@ class RunStatus(str, Enum):
 
 
 # ============================================================================
+# 多 Agent 相关枚举和数据类
+# 用于 multi_agent 子系统，定义子 agent 生命周期和父-子通信数据结构
+# ============================================================================
+
+class TaskStatus(str, Enum):
+    """子 Agent 的生命周期状态。"""
+    PENDING     = "pending"       # 已创建，尚未启动
+    RUNNING     = "running"       # 正在执行中
+    COMPLETED   = "completed"     # 正常完成（RunResult.status == SUCCESS）
+    ERROR       = "error"         # 异常终止（抛出未捕获异常）
+    TIMED_OUT   = "timed_out"     # 达到 max_steps 或超时熔断
+
+
+class SubAgentType(str, Enum):
+    """预定义的子 Agent 类型。"""
+    EXPLORE = "explore"       # 只读代码探索
+    REVIEW  = "review"        # 代码审查
+    FORK    = "fork"          # 动态并行任务，复用父 agent 上下文
+
+
+@dataclass
+class TaskNotification:
+    """
+    子 Agent 完成后的通知，注入父 Agent 对话历史。
+
+    由 TaskRegistry.drain_notifications() 产出，
+    Agent._check_child_completions() 将其序列化后作为 user 消息注入。
+    """
+    task_id: str                    # 子 agent 的 task_id
+    agent_type: SubAgentType        # explore / review / fork
+    status: TaskStatus              # completed / error / timed_out
+    summary: str                    # 结果摘要 / 错误信息
+    steps_taken: int = 0            # 子 agent 消耗的步数
+    total_tokens: int = 0           # 子 agent 消耗的 token 数
+
+
+# ============================================================================
 # Task — 输入
 # 这是 Agent 运行的"起点"：用户（或 CLI / GitHub Issue 入口）构造一个 Task，
 # 传给 Agent.run()，Agent 主循环据此开始工作。

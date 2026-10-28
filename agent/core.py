@@ -61,6 +61,7 @@ from agent.prompt import (
 from agent.task import (
     Action, ActionType, Event, EventType,
     Observation, ObservationStatus, RunResult, RunStatus, Task, ToolCall,
+    TaskNotification,
 )
 # LLMBackend → 抽象基类（依赖倒置：Agent 不依赖具体实现）
 # LLMMessage → 统一消息格式（system/user/assistant）
@@ -110,6 +111,10 @@ class AgentConfig:
     confirm_dangerous: bool = False
     # 确认回调（None=直接执行，terminal_confirm=等待用户 y/n，always_deny=拒绝）
     confirm_callback: object = None
+    # ── 中断信号 ────────────────────────────────────────────────────────
+    # 可选的停止检查回调：每步循环开始时调用，返回 True 时 Agent 优雅终止。
+    # SubAgent 使用此回调接收父线程的中断信号。
+    stop_check: object = None  # Callable[[], bool] | None
 
 
 
@@ -140,11 +145,14 @@ class Agent:
         backend: LLMBackend,
         registry: ToolRegistry,
         config: AgentConfig | None = None,
+        task_registry: "TaskRegistry | None" = None,
     ) -> None:
         # LLM 后端实例（策略模式的具体策略，测试/生产可替换）
         self._backend = backend
         # 工具注册表（注册了 12 个 BaseTool 子类实例）
         self._registry = registry
+        # 多 Agent 任务注册中心（None = 单 Agent 模式，向后兼容）
+        self._task_registry = task_registry
         # 运行时配置（熔断/重试/流式/确认参数）
         self._cfg = config or AgentConfig()
 
@@ -213,11 +221,40 @@ class Agent:
         for step in range(1, task.max_steps + 1):
             logger.debug("Step %d/%d", step, task.max_steps)
 
+            # ── 阶段 -1：检查外部中断信号 ──────────────────────────
+            # SubAgent 通过 stop_check 回调传入停止信号。
+            # 返回 True 时 Agent 立即保存当前状态并优雅退出。
+            if self._cfg.stop_check is not None:
+                try:
+                    if self._cfg.stop_check():
+                        reason = "Stop signal received from parent."
+                        logger.info(reason)
+                        log.log_task_failed(steps=step, reason=reason)
+                        return RunResult(
+                            task_id=task.task_id,
+                            status=RunStatus.GAVE_UP,
+                            summary=reason,
+                            steps_taken=step,
+                            total_tokens=total_tokens,
+                        )
+                except Exception:
+                    pass  # 回调异常不应影响 Agent 正常运行
+
+            # ── 阶段 0：检查子 Agent 完成状态 ──────────────────────
+            # 每步开始时检查是否有后台子 Agent 已完成，
+            # 如果有，将完成通知注入当前 history
+            self._check_child_completions(history, log)
+
             # ── 阶段 1：上下文组装 ────────────────────────────────────
             # _build_messages = system prompt（含 repo-map 摘要）+ 裁剪后的 history
             # _registry.get_schemas = 12 个工具的 JSON Schema
             messages = self._build_messages(history, token_budget, repo_map)
             tools = self._registry.get_schemas()
+
+            # ── 阶段 1b：更新 TaskTool 父上下文 ───────────────────────
+            # 将最新的 system prompt + history 同步到 TaskTool，
+            # 确保后续 spawn 的子 Agent 能复制最新的父上下文
+            self._update_task_tool_context(history)
 
             # ── 阶段 2：LLM 推理（带重试） ──────────────────────────
             try:
@@ -400,6 +437,64 @@ class Agent:
     # 以下方法由 run() 在 ReAct 循环各阶段调用，不对外暴露。
     # ==================================================================
 
+    def _check_child_completions(
+        self, history: ConversationHistory, log: EventLog
+    ) -> None:
+        """
+        检查 TaskRegistry 中是否有新完成的子 Agent。
+
+        每步 ReAct 循环开始时调用。发现已完成的子 Agent 后：
+        1. 更新 TaskRegistry 中的任务状态
+        2. 提取完成通知
+        3. 以 user 消息格式注入父 Agent 对话历史
+
+        父 Agent 在下一步 LLM 调用时就会看到这个通知。
+        """
+        if self._task_registry is None:
+            return
+
+        # 更新完成状态
+        self._task_registry.poll()
+
+        # 收取待处理通知
+        notifications = self._task_registry.drain_notifications()
+        if not notifications:
+            return
+
+        for notif in notifications:
+            status_icon = "SUCCESS" if notif.status.value == "completed" else "FAILED"
+            notification_text = (
+                f"[SUB-AGENT NOTIFICATION]\n"
+                f"Task ID: {notif.task_id}\n"
+                f"Type: {notif.agent_type.value}\n"
+                f"Status: {status_icon}\n"
+                f"Steps: {notif.steps_taken} | Tokens: {notif.total_tokens}\n"
+                f"Summary: {notif.summary}\n"
+            )
+            history.add(LLMMessage(role="user", content=notification_text))
+            logger.info(
+                "Sub-agent %s (%s) completed: %s",
+                notif.task_id,
+                notif.agent_type.value,
+                notif.status.value,
+            )
+
+    def _update_task_tool_context(self, history: ConversationHistory) -> None:
+        """
+        将当前 system prompt 和 history 同步到 TaskTool。
+
+        使用 _build_messages 中缓存的 system prompt，避免重复生成。
+        确保子 Agent 创建时复制的是父 Agent 最新的上下文。
+        """
+        if self._task_registry is None:
+            return
+
+        if "task" in self._registry:
+            task_tool = self._registry._tools["task"]
+            if hasattr(task_tool, "set_parent_context"):
+                system_prompt = getattr(self, "_cached_system_prompt", "")
+                task_tool.set_parent_context(history, system_prompt)
+
     def _build_messages(
         self,
         history: ConversationHistory,
@@ -429,6 +524,9 @@ class Agent:
             tools=schemas,
             repo_summary=self._repo_map_cache,
         )
+        # 缓存 system prompt（供 _update_task_tool_context 复用，避免重复生成）
+        self._cached_system_prompt = system_content
+        self._cached_repo_summary = self._repo_map_cache
 
         # 第二层裁剪（Token 维度）：从最新到最旧贪婪选择，保留首条，丢弃插入提示。
         # 第一层已由 ConversationHistory 滑动窗口完成（条数维度）。

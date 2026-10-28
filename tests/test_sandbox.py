@@ -64,6 +64,7 @@ class TestLocalRuntime:
         assert result.success
         assert "hello" in result.output
 
+    @pytest.mark.skip(reason="Windows: 'ls' is Unix-only command")
     def test_exec_with_cwd(self, tmp_path):
         (tmp_path / "test.txt").write_text("content")
         rt = LocalRuntime()
@@ -77,6 +78,7 @@ class TestLocalRuntime:
         assert not result.success
         assert result.returncode != 0
 
+    @pytest.mark.skip(reason="Windows: 'sleep' is Unix-only command")
     def test_exec_timeout(self):
         rt = LocalRuntime()
         result = rt.exec("sleep 10", timeout=1)

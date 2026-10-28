@@ -217,7 +217,7 @@ class ChatSession:
     - repo_map 缓存（换 repo 时自动失效）
     """
 
-    def __init__(self, backend, registry, config, repo_path: str, log_dir: str, confirm_callback=None) -> None:
+    def __init__(self, backend, registry, config, repo_path: str, log_dir: str, confirm_callback=None, task_registry=None) -> None:
         from agent.core import Agent, AgentConfig
         from context.history import ConversationHistory
 
@@ -283,7 +283,7 @@ class ChatSession:
             confirm_dangerous=confirm_callback is not None,
             confirm_callback=confirm_callback,
         )
-        self.agent = Agent(backend, registry, agent_cfg)
+        self.agent = Agent(backend, registry, agent_cfg, task_registry=task_registry)
         # 共享历史：跨轮次复用，不随 EventLog 清空
         # max_messages = history_window * 2（同上理由）
         self._shared_history = ConversationHistory(
