@@ -16,8 +16,6 @@ from __future__ import annotations
 
 import base64
 import json
-import os
-import shlex
 from pathlib import Path
 from typing import Any
 
@@ -96,35 +94,13 @@ class FileReadTool(BaseTool):
 
     def execute(self, params: dict[str, Any]) -> ToolResult:
         path = params.get("path", "")
-
-        if self._runtime:
-            return self._execute_via_runtime(path)
-        return self._execute_local(path)
-
-    def _execute_local(self, path: str) -> ToolResult:
-        """本地模式：直接使用 Path().read_text()"""
-        p = Path(path)
-        if not p.exists():
-            return ToolResult(success=False, output="", error=f"File not found: {path}")
-        if not p.is_file():
-            return ToolResult(success=False, output="", error=f"Not a file: {path}")
-
-        try:
-            lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
-        except OSError as e:
-            return ToolResult(success=False, output="", error=str(e))
-
-        return _format_file_content(path, lines, MAX_READ_LINES)
-
-    def _execute_via_runtime(self, path: str) -> ToolResult:
-        """容器模式：通过 runtime.exec() 在容器内执行 cat"""
-        result = self._runtime.exec(f"cat -- {shlex.quote(path)}", timeout=10)
+        result = _file_operation(self._runtime, "read_window", {"path": path, "start_line": 1, "window_size": MAX_READ_LINES})
         if not result.success:
-            err = result.stderr.strip() or f"File not found: {path}"
-            return ToolResult(success=False, output="", error=err)
+            return result
+        data = json.loads(result.output)
+        return _format_file_content(path, data["lines"], MAX_READ_LINES, data["total"])
 
-        lines = result.stdout.splitlines()
-        return _format_file_content(path, lines, MAX_READ_LINES)
+
 
 
 # ===========================================================================
@@ -179,59 +155,13 @@ class FileViewTool(BaseTool):
         start_line = params.get("start_line", 1)
         if type(start_line) is not int or start_line < 1:
             return ToolResult(success=False, output="", error="start_line must be an integer >= 1")
-
-        if self._runtime:
-            return self._execute_via_runtime(path, start_line)
-        return self._execute_local(path, start_line)
-
-    def _execute_local(self, path: str, start_line: int) -> ToolResult:
-        """本地模式：直接使用 Path().read_text()"""
-        p = Path(path)
-        if not p.exists():
-            return ToolResult(success=False, output="", error=f"File not found: {path}")
-        if not p.is_file():
-            return ToolResult(success=False, output="", error=f"Not a file: {path}")
-
-        try:
-            all_lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
-        except OSError as e:
-            return ToolResult(success=False, output="", error=str(e))
-
-        if start_line > len(all_lines) and all_lines:
-            return ToolResult(success=False, output="", error=f"start_line {start_line} exceeds {len(all_lines)} lines")
-        return _format_view(path, all_lines[start_line - 1:start_line - 1 + VIEW_WINDOW_LINES], start_line, VIEW_WINDOW_LINES, len(all_lines))
-
-    def _execute_via_runtime(self, path: str, start_line: int) -> ToolResult:
-        """容器模式：通过 Python 脚本在容器内读取指定行"""
-        # 用 Python 读文件，取指定行范围，避免一次性读大文件
-        script = (
-            f"import sys; "
-            f"lines = open({path!r}, encoding='utf-8', errors='replace').readlines(); "
-            f"total = len(lines); "
-            f"s = max(0, {start_line} - 1); "
-            f"e = min(total, s + {VIEW_WINDOW_LINES}); "
-            f"sys.stdout.write(str(total) + '\\n'); "
-            f"sys.stdout.write(''.join(lines[s:e]))"
-        )
-        result = self._runtime.exec(_python_command(script), timeout=10)
+        result = _file_operation(self._runtime, "read_window", {"path": path, "start_line": start_line, "window_size": VIEW_WINDOW_LINES})
         if not result.success:
-            return ToolResult(
-                success=False, output="",
-                error=result.stderr.strip() or f"File not found: {path}",
-            )
+            return result
+        data = json.loads(result.output)
+        return _format_view(path, data["lines"], start_line, VIEW_WINDOW_LINES, data["total"])
 
-        out = result.stdout
-        first_nl = out.find("\n")
-        if first_nl == -1:
-            return ToolResult(success=False, output="", error=f"Empty file: {path}")
 
-        total = int(out[:first_nl])
-        if start_line > total and total:
-            return ToolResult(success=False, output="", error=f"start_line {start_line} exceeds {total} lines")
-        content = out[first_nl + 1:]
-        window_lines = content.splitlines()
-
-        return _format_view(path, window_lines, start_line, VIEW_WINDOW_LINES, total)
 
 
 # ===========================================================================
@@ -288,52 +218,16 @@ class FileWriteTool(BaseTool):
 
         return _file_operation(self._runtime, "write_file", {"path": path, "content": content})
 
-    def _execute_local(self, path: str, content: str) -> ToolResult:
-        """本地模式：直接使用 Path().write_text()"""
-        p = Path(path)
-        try:
-            p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text(content, encoding="utf-8")
-        except OSError as e:
-            return ToolResult(success=False, output="", error=str(e))
 
-        line_count = content.count("\n") + (1 if content and not content.endswith("\n") else 0)
-        return ToolResult(success=True, output=f"Written {line_count} lines to {path}")
-
-    def _execute_via_runtime(self, path: str, content: str) -> ToolResult:
-        """
-        容器模式：base64 编码后通过 Python 写入，零 shell 逃逸风险。
-
-        为什么不用 echo/printf/heredoc？
-        - 文件内容可能含 $、`、"、'、\ 等 shell 特殊字符
-        - base64 只含 A-Za-z0-9+/=，没有注入风险
-        - Python 解码后写入，任何内容都能处理
-        """
-        b64 = base64.b64encode(content.encode("utf-8")).decode("ascii")
-        script = (
-            f"import base64; "
-            f"import os; "
-            f"os.makedirs(os.path.dirname('{path}'), exist_ok=True); "
-            f"open('{path}','w').write(base64.b64decode('{b64}').decode())"
-        )
-        result = self._runtime.exec(f'python -c "{script}"', timeout=10)
-        if not result.success:
-            return ToolResult(
-                success=False, output="",
-                error=result.stderr.strip() or f"Failed to write: {path}",
-            )
-
-        line_count = content.count("\n") + (1 if content and not content.endswith("\n") else 0)
-        return ToolResult(success=True, output=f"Written {line_count} lines to {path}")
 
 
 # ===========================================================================
 # 内部辅助：格式化输出
 # ===========================================================================
 
-def _format_file_content(path: str, lines: list[str], max_lines: int) -> ToolResult:
+def _format_file_content(path: str, lines: list[str], max_lines: int, total: int | None = None) -> ToolResult:
     """格式化文件内容：加行号、截断提示。"""
-    total = len(lines)
+    total = len(lines) if total is None else total
     truncated = total > max_lines
     display_lines = lines[:max_lines]
 

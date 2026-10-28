@@ -217,13 +217,14 @@ class ChatSession:
     - repo_map 缓存（换 repo 时自动失效）
     """
 
-    def __init__(self, backend, registry, config, repo_path: str, log_dir: str, confirm_callback=None, task_registry=None) -> None:
+    def __init__(self, backend, registry, config, repo_path: str, log_dir: str, confirm_callback=None, task_registry=None, runtime=None, task_type="modify") -> None:
         from agent.core import Agent, AgentConfig
         from context.history import ConversationHistory
 
         self.repo_path = repo_path
         self.log_dir = log_dir
         self.config = config
+        self.task_type = task_type
         self._confirm_callback = confirm_callback
 
         # ── 流式回调闭包 ──────────────────────────────────────────────
@@ -283,7 +284,7 @@ class ChatSession:
             confirm_dangerous=confirm_callback is not None,
             confirm_callback=confirm_callback,
         )
-        self.agent = Agent(backend, registry, agent_cfg, task_registry=task_registry)
+        self.agent = Agent(backend, registry, agent_cfg, task_registry=task_registry, runtime=runtime)
         # 共享历史：跨轮次复用，不随 EventLog 清空
         # max_messages = history_window * 2（同上理由）
         self._shared_history = ConversationHistory(
@@ -323,6 +324,7 @@ class ChatSession:
             repo_path=self.repo_path,
             max_steps=self.config.agent.max_steps,
             budget_tokens=self.config.agent.budget_tokens,
+            task_type=self.task_type,
         )
 
         # 把共享 history 注入 agent（替换它内部的 history）

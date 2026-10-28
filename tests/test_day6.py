@@ -179,6 +179,11 @@ class TestCliHelp:
 class TestCliRun:
     """使用 MockBackend 测试 run 命令，不消耗真实 API。"""
 
+    @pytest.fixture(autouse=True)
+    def mock_runtime(self, monkeypatch):
+        from tools.runtime import LocalRuntime
+        monkeypatch.setattr("tools.runtime.create_runtime", lambda **kwargs: LocalRuntime(repo_path=kwargs.get("repo_path")))
+
     def _invoke_run(self, tmp_path, task="fix it", extra_args=None):
         """辅助：用 MockBackend 跑 CLI run 命令。"""
         from agent.task import Action, ActionType
@@ -190,6 +195,7 @@ class TestCliRun:
         runner = CliRunner()
         args = [
             "run",
+            "--no-sandbox", "--task-type", "read_only",
             "--repo", str(tmp_path),
             "--task", task,
         ]
@@ -253,6 +259,7 @@ class TestCliRun:
                 mock_cfg.return_value = cfg
                 result = runner.invoke(cli, [
                     "run",
+                    "--no-sandbox", "--task-type", "read_only",
                     "--repo", str(tmp_path),
                     "--task-file", str(task_file),
                 ], obj={})
@@ -268,7 +275,7 @@ class TestCliLog:
         from agent.core import Agent
         from tools.base import NoopTool, ToolRegistry
 
-        task = Task(
+        task = Task(task_type="read_only",
             task_id="logtest1",
             description="test task",
             repo_path=str(tmp_path),

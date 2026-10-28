@@ -45,6 +45,7 @@ def make_session(backend, registry, cfg, tmp_path) -> ChatSession:
         config=cfg,
         repo_path=str(tmp_path),
         log_dir=cfg.agent.log_dir,
+        task_type="read_only",
     )
 
 

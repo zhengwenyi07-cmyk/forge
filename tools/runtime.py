@@ -33,6 +33,8 @@ from __future__ import annotations
 import subprocess
 import logging
 import uuid
+import shlex
+import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
@@ -118,6 +120,9 @@ class LocalRuntime(Runtime):
     行为和之前完全一致，是默认 runtime。
     """
 
+    def __init__(self, repo_path: str | None = None):
+        self.repo_path = repo_path
+
     @property
     def name(self) -> str:
         return "local"
@@ -132,10 +137,11 @@ class LocalRuntime(Runtime):
             proc = subprocess.run(
                 cmd,
                 shell=True,
+                executable="/bin/bash" if os.name != "nt" else None,
                 capture_output=True,
                 encoding="utf-8", errors="replace",
                 timeout=timeout,
-                cwd=cwd,
+                cwd=cwd or self.repo_path,
             )
             return RunResult(
                 returncode=proc.returncode,
@@ -158,7 +164,7 @@ class LocalRuntime(Runtime):
 
 # 沙箱容器使用的 Docker 镜像
 # 包含 Python、git、常用工具，体积合理
-SANDBOX_IMAGE = "python:3.11-slim"
+SANDBOX_IMAGE = "forge-runtime:py311"
 
 # 容器内 repo 的挂载路径
 CONTAINER_WORKDIR = "/workspace"
@@ -204,7 +210,11 @@ class DockerRuntime(Runtime):
         self._repo_path = str(Path(repo_path).resolve())
         self._image = image
         self._extra_mounts = extra_mounts or []
-        self._setup_cmds = setup_cmds or []
+        self._setup_cmds = list(setup_cmds or [])
+        self._environment: dict[str, str] = {}
+        self._workdir = CONTAINER_WORKDIR
+        self._command_prefix = ""
+        self._helper_python = "python"
         self._container_id: str | None = None
         self._allow_network: bool = False
         # 默认 setup 完成后断网（安全隔离）
@@ -246,21 +256,28 @@ class DockerRuntime(Runtime):
         if cwd:
             # 如果 cwd 是宿主机路径，转换为容器内路径
             host_cwd = str(Path(cwd).resolve())
-            if host_cwd.startswith(self._repo_path):
-                relative = host_cwd[len(self._repo_path):].lstrip("/\\")
+            if Path(host_cwd).is_relative_to(Path(self._repo_path)):
+                relative = str(Path(host_cwd).relative_to(self._repo_path))
+                if relative == '.':
+                    relative = ''
                 # 确保使用正斜杠（容器内是 Linux）
                 relative = relative.replace("\\", "/")
-                container_cwd = f"{CONTAINER_WORKDIR}/{relative}" if relative else CONTAINER_WORKDIR
+                container_cwd = f"{self._workdir}/{relative}" if relative else self._workdir
             else:
                 container_cwd = cwd   # 可能是容器内的绝对路径
         else:
-            container_cwd = CONTAINER_WORKDIR
+            container_cwd = self._workdir
+
+        if cmd.startswith('python -c "import base64;'):
+            cmd = self._helper_python + cmd[len("python"):]
+        if self._command_prefix:
+            cmd = self._command_prefix + " && " + cmd
 
         docker_cmd = [
             "docker", "exec",
             "--workdir", container_cwd,
             self._container_id,
-            "bash", "-c", cmd,
+            "timeout", "--signal=TERM", "--kill-after=5", str(timeout), "bash", "-c", cmd,
         ]
 
         try:
@@ -270,6 +287,8 @@ class DockerRuntime(Runtime):
                 encoding="utf-8", errors="replace",
                 timeout=timeout + 5,   # docker exec 本身有少量开销
             )
+            if proc.returncode in (124, 137):
+                return RunResult(returncode=-1, stdout=proc.stdout, stderr=f"Command timed out after {timeout}s\n{proc.stderr}")
             return RunResult(
                 returncode=proc.returncode,
                 stdout=proc.stdout,
@@ -314,28 +333,31 @@ class DockerRuntime(Runtime):
         )
 
         # 检查 Docker 是否可用
-        check = subprocess.run(
-            ["docker", "info"],
-            capture_output=True, timeout=10,
-        )
+        try:
+            check = subprocess.run(["docker", "info", "--format", "{{.OSType}}"], capture_output=True, timeout=10)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return RunResult(-1, "", f"Docker preflight failed: {exc}")
         if check.returncode != 0:
             return RunResult(
                 returncode=-1,
                 stdout="",
                 stderr=(
                     "Docker is not available. "
-                    "Make sure Docker Desktop is running, or use --no-sandbox."
+                    "Make sure Docker Desktop's Linux engine is running."
                 ),
             )
 
+        if check.stdout.strip() not in (b'linux', 'linux'):
+            return RunResult(-1, "", "Docker must use Linux containers.")
         # 构建 docker run 命令
         run_args = [
             "docker", "run",
             "--detach",                                 # 后台运行
             "--name", self._container_name,
             "--rm",                                     # 停止时自动删除
-            "-v", f"{self._repo_path}:{CONTAINER_WORKDIR}",  # mount repo
-            "--workdir", CONTAINER_WORKDIR,
+            "--init",
+            "-v", f"{self._repo_path}:{self._workdir}",
+            "--workdir", self._workdir,
         ]
 
         # 网络策略：默认断网更安全，但 setup_cmds 需要网络（apt-get/pip install）
@@ -353,6 +375,8 @@ class DockerRuntime(Runtime):
         # 额外 mount
         for host_path, container_path in self._extra_mounts:
             run_args += ["-v", f"{host_path}:{container_path}"]
+        for key, value in self._environment.items():
+            run_args += ["-e", f"{key}={value}"]
 
         run_args += [self._image, "tail", "-f", "/dev/null"]
 
@@ -368,6 +392,8 @@ class DockerRuntime(Runtime):
                 returncode=-1, stdout="",
                 stderr="Timed out starting Docker container (60s). Is Docker running?",
             )
+        except OSError as exc:
+            return RunResult(-1, "", str(exc))
 
         if proc.returncode != 0:
             return RunResult(
@@ -383,9 +409,8 @@ class DockerRuntime(Runtime):
         for setup_cmd in self._setup_cmds:
             result = self.exec(setup_cmd, timeout=120)
             if not result.success:
-                logger.warning(
-                    "Setup command failed: %r\n%s", setup_cmd, result.stderr
-                )
+                self.cleanup()
+                return RunResult(-1, result.stdout, f"Setup failed: {setup_cmd}\n{result.stderr}")
 
         # setup 完成后断网，恢复沙箱隔离
         # 只有初始有网络（_allow_network=True）且设了 post-setup 断网时才执行
@@ -400,6 +425,19 @@ class DockerRuntime(Runtime):
                 logger.warning("Failed to disconnect network after setup: %s", e)
 
         return None   # 成功
+
+    def preflight(self) -> RunResult:
+        return self.exec("python --version && git --version", timeout=30)
+
+    def for_repo(self, repo_path: str, extra_mounts=None, environment=None):
+        runtime = DockerRuntime(repo_path, image=self._image, setup_cmds=list(self._setup_cmds), extra_mounts=extra_mounts)
+        runtime._allow_network = self._allow_network
+        runtime._disconnect_after_setup = self._disconnect_after_setup
+        runtime._environment = dict(environment or {})
+        runtime._workdir = self._workdir
+        runtime._command_prefix = self._command_prefix
+        runtime._helper_python = self._helper_python
+        return runtime
 
     def install_requirements(self, requirements_file: str = "requirements.txt") -> RunResult:
         """
@@ -416,7 +454,7 @@ class DockerRuntime(Runtime):
 # ---------------------------------------------------------------------------
 
 def create_runtime(
-    sandbox: bool = False,
+    sandbox: bool = True,
     repo_path: str | None = None,
     image: str = SANDBOX_IMAGE,
     network: bool = True,
@@ -437,13 +475,15 @@ def create_runtime(
         Runtime 实例
     """
     if not sandbox:
-        return LocalRuntime()
+        if os.name == "nt":
+            raise ValueError("Native Windows execution is unsupported. Use Docker or run Forge inside Linux/WSL.")
+        return LocalRuntime(repo_path=repo_path)
 
     if not repo_path:
         raise ValueError("repo_path is required when sandbox=True")
 
     if setup_cmds is None:
-        setup_cmds = list(DEFAULT_SETUP_CMDS)
+        setup_cmds = ["git config --global safe.directory '*'", "git config --global user.email agent@forge.dev", "git config --global user.name 'Forge Agent'"]
 
     runtime = DockerRuntime(
         repo_path=repo_path,

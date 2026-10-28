@@ -107,7 +107,8 @@ def _build_registry(cfg, confirm_callback=None, runtime=None,
         repo_path: repo 路径（启用 multi-agent 时传入）
     """
     from tools.base import ToolRegistry
-    from tools.file_tool import FileReadTool, FileViewTool, FileWriteTool
+    from tools.file_tool import FileReadTool, FileViewTool, FileWriteTool, FileEditTool, ApplyPatchTool
+    from tools.control_tool import FinishTool, GiveUpTool
     from tools.git_tool import GitAddTool, GitCommitTool, GitDiffTool, GitStatusTool
     from tools.search_tool import FindFilesTool, FindSymbolTool, SearchTextTool
     from tools.shell_tool import ShellTool
@@ -119,6 +120,10 @@ def _build_registry(cfg, confirm_callback=None, runtime=None,
         .register(FileReadTool(runtime=runtime))
         .register(FileViewTool(runtime=runtime))
         .register(FileWriteTool(runtime=runtime))
+        .register(FileEditTool(runtime=runtime))
+        .register(ApplyPatchTool(runtime=runtime))
+        .register(FinishTool())
+        .register(GiveUpTool())
         .register(SearchTextTool(runtime=runtime))
         .register(FindFilesTool(runtime=runtime))
         .register(FindSymbolTool(runtime=runtime))
@@ -132,6 +137,7 @@ def _build_registry(cfg, confirm_callback=None, runtime=None,
     # 注册 TaskTool（multi-agent 入口）
     if task_registry and backend and repo_path:
         from tools.task_tool import TaskTool
+        from tools.task_control import TaskWaitTool, TaskMessageTool
         registry.register(TaskTool(
             backend=backend,
             registry=registry,
@@ -139,6 +145,7 @@ def _build_registry(cfg, confirm_callback=None, runtime=None,
             repo_path=repo_path,
             runtime=runtime,
         ))
+        registry.register(TaskWaitTool(task_registry)).register(TaskMessageTool(task_registry))
 
     return registry
 
@@ -243,7 +250,9 @@ def cli(ctx: click.Context, config: str | None) -> None:
 @click.option("--max-steps", default=None, type=int, help="Override max steps")
 @click.option("--stream", "-s", is_flag=True, default=True, help="Enable streaming output (default: on)")
 @click.option("--confirm", is_flag=True, default=False, help="Ask confirmation before running dangerous shell commands")
-@click.option("--sandbox", is_flag=True, default=False, help="Run commands in Docker sandbox (requires Docker)")
+@click.option("--sandbox/--no-sandbox", default=True, help="Use Linux Docker by default; --no-sandbox requires Linux/WSL")
+@click.option("--task-type", type=click.Choice(["modify", "read_only"]), default="modify")
+@click.option("--test-cmd", default=None, help="Targeted test command to attempt before finishing")
 @click.option("--verbose", "-v", is_flag=True, help="Show debug logs")
 @click.pass_context
 def run(
@@ -257,6 +266,8 @@ def run(
     stream: bool,
     confirm: bool,
     sandbox: bool,
+    task_type: str,
+    test_cmd: str | None,
     verbose: bool,
 ) -> None:
     """
@@ -321,7 +332,14 @@ def run(
     from tools.shell_tool import terminal_confirm
     from tools.runtime import create_runtime
     confirm_cb = terminal_confirm if confirm else None
-    runtime = create_runtime(sandbox=sandbox, repo_path=str(repo_path)) if sandbox else None
+    try:
+        runtime = create_runtime(sandbox=sandbox, repo_path=str(repo_path))
+        if sandbox:
+            check = runtime.preflight()
+            if not check.success:
+                raise ValueError(check.stderr)
+    except ValueError as exc:
+        raise click.ClickException(str(exc))
     if sandbox:
         click.echo(dim(f"  Sandbox: Docker ({runtime.name})"))
 
@@ -362,11 +380,13 @@ def run(
         confirm_dangerous=confirm,
         confirm_callback=confirm_cb,
     )
-    agent = Agent(backend, registry, agent_config, task_registry=task_registry)
+    agent = Agent(backend, registry, agent_config, task_registry=task_registry, runtime=runtime)
 
     task_obj = Task(
         description=description,
-        repo_path="/workspace" if sandbox else str(repo_path),
+        repo_path=str(repo_path),
+        task_type=task_type,
+        test_cmd=test_cmd,
         max_steps=config.agent.max_steps,
         budget_tokens=config.agent.budget_tokens,
     )
@@ -427,7 +447,7 @@ def run(
 @click.option("--model", "-m", default=None, help="Override LLM model name")
 @click.option("--provider", "-p", default=None, help="Override LLM provider")
 @click.option("--max-steps", default=None, type=int, help="Max steps per round")
-@click.option("--sandbox", is_flag=True, default=False, help="Run commands in Docker sandbox (requires Docker)")
+@click.option("--sandbox/--no-sandbox", default=True, help="Use Linux Docker by default; --no-sandbox requires Linux/WSL")
 @click.option("--verbose", "-v", is_flag=True, help="Show debug logs")
 @click.pass_context
 def chat(
@@ -480,7 +500,14 @@ def chat(
     from tools.runtime import create_runtime
     from multi_agent.task_registry import TaskRegistry
     task_registry = TaskRegistry()
-    runtime = create_runtime(sandbox=sandbox, repo_path=str(repo_path)) if sandbox else None
+    try:
+        runtime = create_runtime(sandbox=sandbox, repo_path=str(repo_path))
+        if sandbox:
+            check = runtime.preflight()
+            if not check.success:
+                raise ValueError(check.stderr)
+    except ValueError as exc:
+        raise click.ClickException(str(exc))
     if sandbox:
         click.echo(dim(f"  Sandbox: Docker ({runtime.name})"))
         registry = _build_registry(
@@ -496,10 +523,11 @@ def chat(
         backend=backend,
         registry=registry,
         config=config,
-        repo_path="/workspace" if sandbox else str(repo_path),
+        repo_path=str(repo_path),
         log_dir=config.agent.log_dir,
         confirm_callback=terminal_confirm,   # chat 模式默认开启确认
         task_registry=task_registry,          # multi-agent 支持
+        runtime=runtime,
     )
 
     # 欢迎信息

@@ -4,3 +4,8 @@
 logs/
 __pycache__/
 *.pyc
+config/*.local.yaml
+.env
+evaluation/runs/
+build/
+dist/

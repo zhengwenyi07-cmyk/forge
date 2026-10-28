@@ -1,26 +1,11 @@
-# SWE-bench 评测专用配置 — 使用小米 MiMo-V2.5-Pro (Token Plan)
+# Standard MiMo API. Local credentials may be passed with --config instead.
 llm:
   provider: openai
-  model: mimo-v2.5-pro
+  model: mimo-v2.6-pro
   api_key: ${MIMO_API_KEY}
-  base_url: https://token-plan-cn.xiaomimimo.com/v1
+  base_url: https://api.xiaomimimo.com/v1
   max_tokens: 8192
-  # MiMo Token Plan 使用自定义 api-key 头而不是标准 Bearer 认证
-  headers:
-    api-key: ${MIMO_API_KEY}
-
 agent:
-  max_steps: 30
+  max_steps: 40
   budget_tokens: 80000
   log_dir: ./logs/swebench
-
-tools:
-  shell:
-    timeout: 60
-    max_output_tokens: 8000
-  file:
-    max_view_lines: 100
-
-context:
-  repo_map_budget: 8000
-  history_window: 20

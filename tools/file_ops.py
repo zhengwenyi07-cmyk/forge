@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import difflib
 import hashlib
+import json
 import os
 import stat
 import tempfile
@@ -10,6 +11,25 @@ from pathlib import Path
 
 MAX_OVERWRITE_BYTES = 32_000
 MAX_OVERWRITE_LINES = 500
+
+
+def read_window(path: str, start_line: int, window_size: int) -> str:
+    target = Path(path)
+    if not target.is_file():
+        raise ValueError(f"File not found or not a regular file: {path}")
+    selected = []
+    total = 0
+    remaining = 20_000
+    with target.open(encoding="utf-8", errors="replace") as stream:
+        for total, line in enumerate(stream, 1):
+            if start_line <= total < start_line + window_size:
+                text = line.rstrip("\r\n")
+                limit = min(remaining, 4_000)
+                selected.append(text if len(text) <= limit else text[:limit] + " [line truncated]")
+                remaining = max(0, remaining - min(len(text), limit))
+    if start_line > max(1, total):
+        raise ValueError(f"start_line {start_line} exceeds {total} lines")
+    return json.dumps({"total": total, "lines": selected}, ensure_ascii=True)
 
 
 def atomic_write(path: Path, data: bytes) -> None:

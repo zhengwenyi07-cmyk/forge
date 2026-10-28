@@ -199,8 +199,12 @@ class TestGitToolWithRuntime:
 
 class TestCreateRuntime:
     def test_no_sandbox_returns_local(self):
-        rt = create_runtime(sandbox=False)
-        assert isinstance(rt, LocalRuntime)
+        import os
+        if os.name == "nt":
+            with pytest.raises(ValueError, match="Windows"):
+                create_runtime(sandbox=False)
+        else:
+            assert isinstance(create_runtime(sandbox=False), LocalRuntime)
 
     def test_sandbox_without_repo_raises(self):
         with pytest.raises(ValueError, match="repo_path"):
@@ -212,7 +216,7 @@ class TestCreateRuntime:
         # 不 start，不清理
 
     def test_local_runtime_context_manager(self):
-        with create_runtime(sandbox=False) as rt:
+        with LocalRuntime() as rt:
             result = rt.exec("echo hi")
         assert "hi" in result.output
 

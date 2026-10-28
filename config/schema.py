@@ -173,6 +173,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
     if path is None:
         # 自动查找：当前目录 → 项目根目录
         candidates = [
+            Path("config/mimo.local.yaml"),
             Path("config/default.yaml"),
             Path(__file__).parent / "default.yaml",
         ]
