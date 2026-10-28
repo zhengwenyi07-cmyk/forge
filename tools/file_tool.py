@@ -15,7 +15,9 @@ tools/file_tool.py
 from __future__ import annotations
 
 import base64
+import json
 import os
+import shlex
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +29,26 @@ from tools.runtime import Runtime
 MAX_READ_LINES = 500
 # file_view 每窗口显示的行数
 VIEW_WINDOW_LINES = 100
+MAX_VIEW_CHARS = 20_000
+
+
+def _python_command(script: str) -> str:
+    payload = base64.b64encode(script.encode("utf-8")).decode("ascii")
+    return f"python -c \"import base64; exec(base64.b64decode('{payload}'))\""
+
+
+def _file_operation(runtime, operation: str, params: dict) -> ToolResult:
+    from tools import file_ops
+    try:
+        if runtime is None:
+            return ToolResult(success=True, output=getattr(file_ops, operation)(**params))
+        source = Path(file_ops.__file__).read_text(encoding="utf-8")
+        payload = json.dumps(params, ensure_ascii=True)
+        script = source + "\nimport json\nprint(" + operation + "(**json.loads(" + repr(payload) + ")))\n"
+        result = runtime.exec(_python_command(script), timeout=10)
+        return ToolResult(success=result.success, output=result.stdout, error=result.stderr if not result.success else None)
+    except (OSError, ValueError, TypeError) as exc:
+        return ToolResult(success=False, output="", error=str(exc))
 
 
 # ===========================================================================
@@ -96,7 +118,7 @@ class FileReadTool(BaseTool):
 
     def _execute_via_runtime(self, path: str) -> ToolResult:
         """容器模式：通过 runtime.exec() 在容器内执行 cat"""
-        result = self._runtime.exec(f"cat '{path}'", timeout=10)
+        result = self._runtime.exec(f"cat -- {shlex.quote(path)}", timeout=10)
         if not result.success:
             err = result.stderr.strip() or f"File not found: {path}"
             return ToolResult(success=False, output="", error=err)
@@ -154,7 +176,9 @@ class FileViewTool(BaseTool):
 
     def execute(self, params: dict[str, Any]) -> ToolResult:
         path = params.get("path", "")
-        start_line = max(1, int(params.get("start_line", 1)))
+        start_line = params.get("start_line", 1)
+        if type(start_line) is not int or start_line < 1:
+            return ToolResult(success=False, output="", error="start_line must be an integer >= 1")
 
         if self._runtime:
             return self._execute_via_runtime(path, start_line)
@@ -173,21 +197,23 @@ class FileViewTool(BaseTool):
         except OSError as e:
             return ToolResult(success=False, output="", error=str(e))
 
-        return _format_view(path, all_lines, start_line, VIEW_WINDOW_LINES)
+        if start_line > len(all_lines) and all_lines:
+            return ToolResult(success=False, output="", error=f"start_line {start_line} exceeds {len(all_lines)} lines")
+        return _format_view(path, all_lines[start_line - 1:start_line - 1 + VIEW_WINDOW_LINES], start_line, VIEW_WINDOW_LINES, len(all_lines))
 
     def _execute_via_runtime(self, path: str, start_line: int) -> ToolResult:
         """容器模式：通过 Python 脚本在容器内读取指定行"""
         # 用 Python 读文件，取指定行范围，避免一次性读大文件
         script = (
             f"import sys; "
-            f"lines = open('{path}').readlines(); "
+            f"lines = open({path!r}, encoding='utf-8', errors='replace').readlines(); "
             f"total = len(lines); "
             f"s = max(0, {start_line} - 1); "
             f"e = min(total, s + {VIEW_WINDOW_LINES}); "
             f"sys.stdout.write(str(total) + '\\n'); "
             f"sys.stdout.write(''.join(lines[s:e]))"
         )
-        result = self._runtime.exec(f'python -c "{script}"', timeout=10)
+        result = self._runtime.exec(_python_command(script), timeout=10)
         if not result.success:
             return ToolResult(
                 success=False, output="",
@@ -200,6 +226,8 @@ class FileViewTool(BaseTool):
             return ToolResult(success=False, output="", error=f"Empty file: {path}")
 
         total = int(out[:first_nl])
+        if start_line > total and total:
+            return ToolResult(success=False, output="", error=f"start_line {start_line} exceeds {total} lines")
         content = out[first_nl + 1:]
         window_lines = content.splitlines()
 
@@ -258,9 +286,7 @@ class FileWriteTool(BaseTool):
         path = params.get("path", "")
         content = params.get("content", "")
 
-        if self._runtime:
-            return self._execute_via_runtime(path, content)
-        return self._execute_local(path, content)
+        return _file_operation(self._runtime, "write_file", {"path": path, "content": content})
 
     def _execute_local(self, path: str, content: str) -> ToolResult:
         """本地模式：直接使用 Path().write_text()"""
@@ -325,7 +351,7 @@ def _format_file_content(path: str, lines: list[str], max_lines: int) -> ToolRes
 
     return ToolResult(
         success=True,
-        output=f"File: {path} ({total} lines total)\n{numbered}{suffix}",
+        output=_bound_content(f"File: {path} ({total} lines total)\n{numbered}{suffix}"),
     )
 
 
@@ -340,6 +366,7 @@ def _format_view(
     if total_lines is None:
         total_lines = start_line + len(window_lines) - 1
 
+    assert len(window_lines) <= window_size, "file_view received more than one window"
     numbered = "\n".join(
         f"{start_line + i:4d} | {line}"
         for i, line in enumerate(window_lines)
@@ -355,4 +382,65 @@ def _format_view(
     else:
         nav = f"\n[Lines {start_line}–{end_line} of {total_lines}. End of file.]"
 
-    return ToolResult(success=True, output=numbered + nav)
+    return ToolResult(success=True, output=_bound_content(numbered + nav))
+
+
+def _bound_content(content: str) -> str:
+    if len(content) <= MAX_VIEW_CHARS:
+        return content
+    return content[:MAX_VIEW_CHARS - 100] + "\n[Content truncated by character limit; request a smaller section.]"
+
+
+class FileEditTool(BaseTool):
+    def __init__(self, runtime: Runtime | None = None) -> None:
+        self._runtime = runtime
+
+    @property
+    def name(self):
+        return "file_edit"
+
+    @property
+    def description(self):
+        return "Precisely replace one unique old_string with new_string. Read the file first. Ambiguous or missing matches make no changes."
+
+    @property
+    def parameters_schema(self):
+        return {"type": "object", "properties": {
+            "path": {"type": "string"}, "old_string": {"type": "string", "minLength": 1},
+            "new_string": {"type": "string"}, "expected_sha256": {"type": "string"},
+        }, "required": ["path", "old_string", "new_string"]}
+
+    def execute(self, params):
+        return _file_operation(self._runtime, "edit_file", params)
+
+
+class ApplyPatchTool(BaseTool):
+    def __init__(self, runtime: Runtime | None = None) -> None:
+        from tools.runtime import LocalRuntime
+        self._runtime = runtime or LocalRuntime()
+
+    @property
+    def name(self):
+        return "apply_patch"
+
+    @property
+    def description(self):
+        return "Apply a standard unified git diff atomically after git apply --check. Paths are relative to the repository root."
+
+    @property
+    def parameters_schema(self):
+        return {"type": "object", "properties": {"patch": {"type": "string", "minLength": 1}}, "required": ["patch"]}
+
+    def execute(self, params):
+        encoded = base64.b64encode(params["patch"].encode("utf-8")).decode("ascii")
+        script = (
+            "import base64,subprocess,sys\n"
+            f"patch=base64.b64decode('{encoded}')\n"
+            "for args in [['git','apply','--check','--whitespace=nowarn','-'],['git','apply','--whitespace=nowarn','-']]:\n"
+            " r=subprocess.run(args,input=patch,capture_output=True)\n"
+            " if r.returncode:\n"
+            "  sys.stderr.buffer.write(r.stderr); sys.exit(r.returncode)\n"
+            "print('Patch applied successfully')\n"
+        )
+        result = self._runtime.exec(_python_command(script), timeout=30)
+        return ToolResult(success=result.success, output=result.stdout, error=result.stderr if not result.success else None)

@@ -113,7 +113,6 @@ class TestFileReadTool:
 class TestFileViewTool:
     tool = FileViewTool()
 
-    @pytest.mark.skip(reason="Windows: CRLF line ending mismatch, off by 1")
     def test_view_from_start(self, large_file):
         result = self.tool.execute({"path": str(large_file), "start_line": 1})
         assert result.success
@@ -134,7 +133,6 @@ class TestFileViewTool:
         result = self.tool.execute({"path": str(large_file), "start_line": 550})
         assert "End of file" in result.output
 
-    @pytest.mark.skip(reason="Windows: FileViewTool does not validate start_line exceeds eof")
     def test_view_start_line_beyond_eof(self, sample_file):
         result = self.tool.execute({"path": str(sample_file), "start_line": 9999})
         assert not result.success
