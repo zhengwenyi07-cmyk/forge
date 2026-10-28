@@ -208,6 +208,7 @@ class TaskTool(BaseTool):
             repo_path=self._repo_path,
             max_steps=max_steps,
             budget_tokens=40_000,
+            task_type="modify" if agent_type == "fork" else "read_only",
         )
 
         # 获取父 Agent 的当前上下文（用于子 Agent 缓存命中）
@@ -271,6 +272,7 @@ class TaskTool(BaseTool):
                     f"## Sub-agent [{task_id}] ({agent_type}) — COMPLETED\n"
                     f"Steps: {result.steps_taken} | Tokens: {result.total_tokens}\n\n"
                     f"{result.summary}"
+                    + (f"\n\nChild patch (review and apply using apply_patch):\n{result.patch}" if result.patch else "")
                 ),
             )
         else:

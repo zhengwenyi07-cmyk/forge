@@ -14,6 +14,8 @@ multi_agent/blacklist.py
 # ---------------------------------------------------------------------------
 
 SUB_AGENT_BLACKLIST: frozenset[str] = frozenset({
+    "task_wait",
+    "task_message",
     "task",          # 不能派孙 agent（强制仅一层深度）
     # "ask_user",    # 不能问用户问题（预留，当前项目无此工具）
     # "plan_mode",   # 不能切换规划模式（预留，当前项目无此工具）
@@ -42,7 +44,6 @@ REVIEW_TOOL_NAMES: frozenset[str] = frozenset({
     "find_symbol",
     "file_read",
     "file_view",
-    "shell",          # 可运行 linter 和 pytest
     "git_status",
     "git_diff",
 })

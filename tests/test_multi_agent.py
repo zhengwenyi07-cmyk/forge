@@ -119,7 +119,7 @@ class TestTaskRegistry:
         sub = SubAgent(
             task_id="aa000001",
             agent_type="explore",
-            task=Task(description="Find auth", repo_path=str(tmp_path)),
+            task=Task(task_type="read_only", description="Find auth", repo_path=str(tmp_path)),
             parent_backend=MockBackend([
                 Action(ActionType.TOOL_CALL, "searching...", ToolCall("search_text", {"pattern": "auth"})),
                 Action(ActionType.FINISH, "done", message="Found auth.py"),
@@ -163,7 +163,7 @@ class TestTaskRegistry:
             sub = SubAgent(
                 task_id=f"task-{i}",
                 agent_type="explore",
-                task=Task(description=f"Task {i}", repo_path=str(tmp_path)),
+                task=Task(task_type="read_only", description=f"Task {i}", repo_path=str(tmp_path)),
                 parent_backend=MockBackend([
                     Action(ActionType.TOOL_CALL, "reading...", ToolCall("file_read", {"path": f"f{i}.py"})),
                     Action(ActionType.FINISH, "done", message=f"Result {i}"),
@@ -198,7 +198,7 @@ class TestTaskRegistry:
         sub = SubAgent(
             task_id="err-001",
             agent_type="explore",
-            task=Task(description="Will fail", repo_path=str(tmp_path), max_steps=5),
+            task=Task(task_type="read_only", description="Will fail", repo_path=str(tmp_path), max_steps=5),
             parent_backend=MockBackend([]),  # 无预设 Action → 直接 GAVE_UP
             parent_registry=builder,
             parent_history=ConversationHistory(max_messages=20),
@@ -224,7 +224,7 @@ class TestTaskRegistry:
         sub = SubAgent(
             task_id="msg-001",
             agent_type="fork",
-            task=Task(description="Background task", repo_path=str(tmp_path)),
+            task=Task(task_type="read_only", description="Background task", repo_path=str(tmp_path)),
             parent_backend=MockBackend([
                 Action(ActionType.TOOL_CALL, "reading...", ToolCall("file_read", {"path": "x.py"})),
                 Action(ActionType.FINISH, "done", message="OK"),
@@ -257,7 +257,7 @@ class TestTaskRegistry:
         sub = SubAgent(
             task_id="count-1",
             agent_type="explore",
-            task=Task(description="Will timeout", repo_path=str(tmp_path), max_steps=3),
+            task=Task(task_type="read_only", description="Will timeout", repo_path=str(tmp_path), max_steps=3),
             parent_backend=MockBackend([
                 Action(ActionType.TOOL_CALL, "search...", ToolCall("file_read", {"path": "x"})),
                 Action(ActionType.TOOL_CALL, "search...", ToolCall("file_read", {"path": "y"})),
@@ -390,7 +390,7 @@ class TestAgentWithChildren:
         agent = Agent(parent_backend, parent_registry, AgentConfig(max_steps=10), task_registry=task_registry)
         agent._current_repo_path = str(tmp_path)
 
-        task = Task(description="Test multi-agent", repo_path=str(tmp_path), max_steps=5)
+        task = Task(task_type="read_only", description="Test multi-agent", repo_path=str(tmp_path), max_steps=5)
 
         with EventLog.create(task, log_dir=str(tmp_path)) as log:
             result = agent.run(task, log)
@@ -445,7 +445,7 @@ class TestAgentWithChildren:
         agent = Agent(parent_backend, parent_registry, AgentConfig(max_steps=10), task_registry=task_registry)
         agent._current_repo_path = str(tmp_path)
 
-        task = Task(description="Test background", repo_path=str(tmp_path), max_steps=5)
+        task = Task(task_type="read_only", description="Test background", repo_path=str(tmp_path), max_steps=5)
 
         with EventLog.create(task, log_dir=str(tmp_path)) as log:
             result = agent.run(task, log)
@@ -598,8 +598,8 @@ class TestBlacklist:
         for tool_name in EXPLORE_TOOL_NAMES:
             assert tool_name not in writable_tools
 
-    def test_review_includes_shell_and_git(self):
-        assert "shell" in REVIEW_TOOL_NAMES
+    def test_review_has_git_views_without_shell(self):
+        assert "shell" not in REVIEW_TOOL_NAMES
         assert "git_diff" in REVIEW_TOOL_NAMES
         assert "git_status" in REVIEW_TOOL_NAMES
 
@@ -667,7 +667,7 @@ class TestChatSessionMultiAgent:
 class TestConcurrencySafety:
     def test_task_registry_concurrent_spawn(self, tmp_path):
         """多线程同时 spawn 子 Agent"""
-        registry = TaskRegistry()
+        registry = TaskRegistry(max_active=5)
         errors = []
 
         def spawn_and_wait(i):
@@ -676,7 +676,7 @@ class TestConcurrencySafety:
                 sub = SubAgent(
                     task_id=f"conc-{i}",
                     agent_type="explore",
-                    task=Task(description=f"Concurrent {i}", repo_path=str(tmp_path)),
+                    task=Task(task_type="read_only", description=f"Concurrent {i}", repo_path=str(tmp_path)),
                     parent_backend=MockBackend([
                         Action(ActionType.FINISH, "done", message=f"Result {i}"),
                     ]),

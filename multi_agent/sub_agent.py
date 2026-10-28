@@ -28,6 +28,8 @@ from __future__ import annotations
 
 import threading
 import time
+import copy
+from dataclasses import replace
 from dataclasses import dataclass
 
 from agent.core import Agent, AgentConfig
@@ -77,7 +79,15 @@ def build_sub_agent_registry(
         # 白名单过滤（如果指定了白名单，只注册白名单中的工具）
         if allowed_tools is not None and name not in allowed_tools:
             continue
-        sub_registry.register(tool)
+        child_tool = copy.copy(tool)
+        if runtime is not None and hasattr(child_tool, "_runtime"):
+            child_tool._runtime = runtime
+        sub_registry.register(child_tool)
+
+    from tools.control_tool import FinishTool, GiveUpTool
+    for tool in (FinishTool(), GiveUpTool()):
+        if tool.name not in sub_registry:
+            sub_registry.register(tool)
 
     return sub_registry
 
@@ -124,6 +134,11 @@ class SubAgent:
         self.task_id = task_id
         self.agent_type = agent_type
         self._timeout = timeout
+        self._parent_registry = parent_registry
+        self._allowed_tools = allowed_tools
+        self._parent_runtime = runtime
+        self._isolated_worktree = None
+        self._child_runtime = None
 
         # 构建受限工具注册表
         self._registry = build_sub_agent_registry(
@@ -161,6 +176,11 @@ class SubAgent:
 
         # 备用引用
         self._task = task
+        if agent_type in ("explore", "review"):
+            self._task = replace(task, task_type="read_only")
+        self._history.add(LLMMessage(role="user", content="[SUB-AGENT ASSIGNMENT]\n" + self._task.description))
+        self._config.system_prompt_override = system_prompt_to_use
+        self._config.message_source = self._mailbox.poll_inbox
         self._log_dir = log_dir
 
     # ── 构建子 Agent 历史（缓存复制） ───────────────────────────────
@@ -216,9 +236,23 @@ class SubAgent:
         """
         try:
             # 将 _stop_event 注入 Agent 配置，Agent 每步循环检查
-            self._config.stop_check = self._stop_event.is_set
+            self._deadline = time.monotonic() + self._timeout
+            self._config.stop_check = lambda: self._stop_event.is_set() or time.monotonic() >= self._deadline
+            if self.agent_type == "fork":
+                from multi_agent.worktree import IsolatedWorktree
+                from tools.runtime import DockerRuntime, LocalRuntime
+                self._isolated_worktree = IsolatedWorktree(self._task.repo_path).create()
+                root = str(self._isolated_worktree.root)
+                if isinstance(self._parent_runtime, DockerRuntime):
+                    mounts, environment = self._isolated_worktree.docker_git_mount(self._parent_runtime._workdir)
+                    self._child_runtime = self._parent_runtime.for_repo(root, mounts, environment)
+                else:
+                    self._child_runtime = LocalRuntime(repo_path=root)
+                self._registry = build_sub_agent_registry(self._parent_registry, self._allowed_tools, SUB_AGENT_BLACKLIST, self._child_runtime)
+                self._task = replace(self._task, repo_path=root)
+                self._history.add(LLMMessage(role="user", content="Work only in your isolated repository: /workspace in Docker, otherwise " + root + ". Use relative paths. Return a patch; do not merge into the parent."))
 
-            agent = Agent(self._backend, self._registry, self._config)
+            agent = Agent(self._backend, self._registry, self._config, runtime=self._child_runtime or self._parent_runtime)
 
             # 注入子 Agent 的独立 history（复用 ChatSession 的注入模式）
             agent._pending_history = self._history
@@ -237,7 +271,14 @@ class SubAgent:
                 error=str(exc),
             )
         finally:
-            self._done.set()  # 无论成功/失败/中断，始终通知父线程
+            try:
+                if self._child_runtime:
+                    self._child_runtime.cleanup()
+                if self._isolated_worktree:
+                    self._isolated_worktree.cleanup()
+            except Exception as exc:
+                self._error = f"Worktree cleanup failed: {exc}"
+            self._done.set()
 
     def stop(self, timeout: float = 10.0) -> RunResult | None:
         """

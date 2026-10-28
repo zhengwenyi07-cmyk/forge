@@ -46,7 +46,6 @@ REVIEW_SYSTEM_PROMPT = """\
 
 ## 可用工具（只读 + 运行分析工具）
 - search_text / find_files / find_symbol / file_read / file_view — 阅读代码
-- shell — 运行 linter、pytest、类型检查
 - git_status / git_diff — 查看变更内容
 
 ## 审查维度
@@ -59,7 +58,7 @@ REVIEW_SYSTEM_PROMPT = """\
 ## 行为准则
 1. 先查看 git diff 了解变更范围
 2. 逐文件审查，重点关注变更部分
-3. 有疑问时运行相关测试或 linter 验证
+3. 有疑问时列出需要父 Agent 验证的测试或 linter 命令
 4. 按严重程度标注：**Critical** / **High** / **Medium** / **Low**
 
 ## 输出要求

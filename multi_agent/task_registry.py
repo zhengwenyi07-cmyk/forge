@@ -53,10 +53,11 @@ class TaskRegistry:
             pass
     """
 
-    def __init__(self) -> None:
+    def __init__(self, max_active: int = 3) -> None:
         self._tasks: dict[str, BackgroundTask] = {}
         self._lock = threading.Lock()
         self._pending_notifications: list[BackgroundTask] = []
+        self._max_active = max_active
 
     # ── 子 Agent 生命周期管理 ──────────────────────────────────────
 
@@ -79,6 +80,8 @@ class TaskRegistry:
         # 直接关联 SubAgent 实例
         task._sub_agent = sub_agent
         with self._lock:
+            if sum(t.status == "running" for t in self._tasks.values()) >= self._max_active:
+                raise RuntimeError(f"Sub-agent limit reached ({self._max_active}); wait for running tasks.")
             self._tasks[task.task_id] = task
         # 启动子 Agent 线程
         sub_agent.start()
@@ -148,6 +151,7 @@ class TaskRegistry:
                     ),
                     steps_taken=task.result.steps_taken if task.result else 0,
                     total_tokens=task.result.total_tokens if task.result else 0,
+                    patch=task.result.patch if task.result else None,
                 )
                 notifications.append(notif)
             self._pending_notifications.clear()
