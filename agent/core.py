@@ -32,6 +32,7 @@ from __future__ import annotations
 import json
 # logging：每个 step 输出 LLM 调用、Action 类型、Reflection 触发等关键事件
 import logging
+import subprocess
 # dataclass：AgentConfig 用 dataclass 承载配置，自动生成 __init__/__repr__
 from dataclasses import dataclass
 
@@ -179,7 +180,7 @@ class Agent:
         """
         # ── 初始化阶段 ────────────────────────────────────────────────
         # 记录 repo_path，供 _build_messages（system prompt 中的 repo 路径）
-        # 和 _get_git_diff（git diff HEAD）使用
+        # 和 _get_git_diff（相对任务开始时的固定提交）使用
         self._current_repo_path = task.repo_path
         self._current_task_type = task.task_type
         from pathlib import Path
@@ -190,6 +191,7 @@ class Agent:
             self._patch_excludes = [log_relative.parent.as_posix() if log_relative.parent != Path(".") else log_relative.as_posix()]
         except ValueError:
             pass
+        self._base_commit = self._resolve_base_commit(task.repo_path)
         initial_patch = self._get_git_diff(task.repo_path) if task.task_type == "modify" else None
         tested_patch = None
         test_attempts = []
@@ -337,18 +339,24 @@ class Agent:
                 patch = self._get_git_diff(task.repo_path)
                 blockers = []
                 if self._task_registry is not None:
-                    self._task_registry.poll()
+                    delivered = self._check_child_completions(history, log)
+                    if delivered:
+                        blockers.append("New child results arrived during your last action. Read the notifications and decide again before finishing.")
                     if self._task_registry.active_count():
                         blockers.append("Child agents are still running; wait for their results before finishing.")
                 if task.task_type == "modify":
                     if not patch or patch == initial_patch:
                         blockers.append("Modification tasks require a new, nonempty diff. Existing changes do not count.")
                     if patch and tested_patch != patch and task.test_cmd:
+                        before_test = patch
                         result = self._registry.execute_tool("test", {"command": task.test_cmd, "cwd": task.repo_path})
                         log.log_observation(step=step, observation=result.to_observation("test"))
                         if result.test_attempted:
-                            tested_patch = self._get_git_diff(task.repo_path)
+                            patch = self._get_git_diff(task.repo_path)
+                            tested_patch = patch if patch == before_test else None
                             test_attempts.append({"command": task.test_cmd, "success": result.success, "output": result.output, "error": result.error})
+                            if not patch or patch == initial_patch:
+                                blockers.append("The test changed or removed the task diff; review the changes and validate again.")
                     if not test_attempts or tested_patch != patch:
                         blockers.append("Attempt a targeted test using the test tool after the last change. Supply path or command, then call finish again.")
                 if blockers:
@@ -385,6 +393,7 @@ class Agent:
             # ── 环节 C：TOOL_CALL — 执行工具 + 回写 + Reflection ──
             if action.action_type == ActionType.TOOL_CALL and action.tool_call:
                 tc = action.tool_call
+                before_test = self._get_git_diff(task.repo_path) if tc.name == "test" else None
 
                 # [拦截] 部分模型（DeepSeek 等）把 "call finish" 当作 function calling
                 # 目标，返回 tool_name="finish" 而非 finish_reason="stop"。
@@ -396,7 +405,8 @@ class Agent:
                 result = self._registry.execute_tool(tc.name, tc.params)
                 observation = result.to_observation(tc.name)
                 if tc.name == "test" and result.test_attempted and (tc.params.get("path") or tc.params.get("command")):
-                    tested_patch = self._get_git_diff(task.repo_path)
+                    after_test = self._get_git_diff(task.repo_path)
+                    tested_patch = after_test if after_test == before_test else None
                     test_attempts.append({"params": tc.params, "success": result.success, "output": result.output, "error": result.error})
 
                 # 追踪文件编辑步数：
@@ -484,7 +494,7 @@ class Agent:
 
     def _check_child_completions(
         self, history: ConversationHistory, log: EventLog
-    ) -> None:
+    ) -> int:
         """
         检查 TaskRegistry 中是否有新完成的子 Agent。
 
@@ -496,7 +506,7 @@ class Agent:
         父 Agent 在下一步 LLM 调用时就会看到这个通知。
         """
         if self._task_registry is None:
-            return
+            return 0
 
         # 更新完成状态
         self._task_registry.poll()
@@ -504,7 +514,7 @@ class Agent:
         # 收取待处理通知
         notifications = self._task_registry.drain_notifications()
         if not notifications:
-            return
+            return 0
 
         for notif in notifications:
             status_icon = "SUCCESS" if notif.status.value == "completed" else "FAILED"
@@ -524,6 +534,7 @@ class Agent:
                 notif.agent_type.value,
                 notif.status.value,
             )
+        return len(notifications)
 
     def _update_task_tool_context(self, history: ConversationHistory) -> None:
         """
@@ -637,6 +648,10 @@ class Agent:
             return False
 
         first = recent[0].tool_call
+        # Waiting is bounded by task steps/tokens and may legitimately repeat
+        # while a child is computing. It is not evidence of a tool-call loop.
+        if first.name == "task_wait":
+            return False
         return all(
             a.tool_call.name == first.name and a.tool_call.params == first.params
             for a in recent[1:]
@@ -690,9 +705,22 @@ class Agent:
 
         raise last_exc  # type: ignore[misc]
 
+    def _resolve_base_commit(self, repo_path: str) -> str | None:
+        from tools import workspace
+        from tools.file_tool import _python_command
+        from pathlib import Path
+        try:
+            if self._runtime is None:
+                return workspace.resolve_head(repo_path)
+            script = Path(workspace.__file__).read_text(encoding="utf-8") + "\nprint(resolve_head())\n"
+            result = self._runtime.exec(_python_command(script), cwd=repo_path, timeout=10)
+            return result.stdout.strip() if result.success else None
+        except (OSError, RuntimeError, subprocess.SubprocessError):
+            return None
+
     def _get_git_diff(self, repo_path: str) -> str | None:
         """
-        抓取 git diff HEAD 作为 patch，失败时静默返回 None。
+        抓取相对任务开始提交的 diff，包含运行中已提交的改动。
         FINISH action 处理时调用（第 179 行、210 行）。
         RunResult.patch 字段包含此 diff，调用方（如 GitHub Issue 入口）可将其作为 PR 代码变更。
         """
@@ -701,9 +729,9 @@ class Agent:
         from tools.file_tool import _python_command
         try:
             if self._runtime is None:
-                diff = workspace.capture_patch(repo_path, getattr(self, "_patch_excludes", []))
+                diff = workspace.capture_patch(repo_path, getattr(self, "_patch_excludes", []), getattr(self, "_base_commit", None) or "HEAD")
             else:
-                script = Path(workspace.__file__).read_text(encoding="utf-8") + f"\nprint(capture_patch(exclude_paths={getattr(self, '_patch_excludes', [])!r}), end='')\n"
+                script = Path(workspace.__file__).read_text(encoding="utf-8") + f"\nprint(capture_patch(exclude_paths={getattr(self, '_patch_excludes', [])!r}, base_ref={getattr(self, '_base_commit', None) or 'HEAD'!r}), end='')\n"
                 result = self._runtime.exec(_python_command(script), cwd=repo_path, timeout=30)
                 if not result.success:
                     return None

@@ -102,6 +102,29 @@ def estimate_chars(tokens: int) -> int:
     return tokens * 4
 
 
+def _bounded_text(text: str, token_limit: int, keep_tail: bool = False) -> str:
+    if token_limit < 1:
+        return ""
+    if estimate_tokens(text) <= token_limit:
+        return text
+    marker = "\n[content truncated]\n"
+    if estimate_tokens(marker) >= token_limit:
+        marker = ""
+    low, high = 0, len(text)
+    best = marker
+    while low <= high:
+        count = (low + high) // 2
+        head = (count + 1) // 2 if keep_tail else count
+        tail = count - head
+        candidate = text[:head] + marker + (text[-tail:] if tail else "")
+        if estimate_tokens(candidate) <= token_limit:
+            best = candidate
+            low = count + 1
+        else:
+            high = count - 1
+    return best
+
+
 def is_tiktoken_available() -> bool:
     """返回 tiktoken 是否可用，供诊断脚本使用。"""
     _init_tiktoken()
@@ -210,13 +233,7 @@ class TokenBudget:
         """
         if estimate_tokens(text) <= token_limit:
             return text
-        # 二分逼近：找到合适的字符截断点
-        char_limit = token_limit * 4
-        candidate = text[:char_limit]
-        while estimate_tokens(candidate) > token_limit and len(candidate) > 0:
-            candidate = candidate[:int(len(candidate) * 0.9)]
-        omitted = estimate_tokens(text[len(candidate):])
-        return candidate + f"\n... [{omitted} tokens truncated]"
+        return _bounded_text(text, token_limit)
 
     def trim_history(
         self,
@@ -235,44 +252,39 @@ class TokenBudget:
         - 第一层（条数）：ConversationHistory._trim() — 从 index 1 弹出旧消息
         - 第二层（Token）：trim_history() — 从最新消息贪婪选择，丢弃的插入截断提示
 
-        算法：从最新到最旧贪婪选择
-        - 保留第一条（0-index）不变（任务描述，永久保留）
-        - 从最后一条开始向前遍历（reversed），每条加入 selected 列表
-        - 如果当前消息 token 数 > 剩余预算 → 跳过并不再继续（因为更旧的消息更大）
-        - 被丢弃的消息数记录到一条截断提示消息中
+        优先保留任务描述与最新结果。超大任务/结果会缩短到预算内，
+        最新结果保留首尾。剩余预算按时间顺序保留最近历史，
+        不会为了放入较小的旧动作而丢弃最新工具结果。
         """
-        if not messages:
-            return messages
+        if not messages or token_limit < 1:
+            return []
+        if len(messages) == 1:
+            return [{**messages[0], "content": self.trim_to(messages[0].get("content", ""), token_limit)}]
 
         token_counts = [estimate_tokens(m.get("content", "")) for m in messages]
-        total = sum(token_counts)
-
-        if total <= token_limit:
+        if sum(token_counts) <= token_limit:
             return messages
-
-        result = [messages[0]]
-        remaining_budget = token_limit - token_counts[0]
-        dropped = 0
-        selected = []
-        budget_left = remaining_budget
-
-        for msg, tokens in zip(reversed(messages[1:]), reversed(token_counts[1:])):
-            if budget_left - tokens >= 0:
-                selected.append(msg)
-                budget_left -= tokens
-            else:
-                dropped += 1
-
-        selected.reverse()
-
-        if dropped > 0:
-            result.append({
-                "role": "user",
-                "content": f"[{dropped} earlier messages were truncated to fit context window]",
-            })
-
-        result.extend(selected)
-        return result
+        # Always reserve space for the newest result. Never replace it with a
+        # smaller old action just because the whole observation does not fit.
+        if token_limit == 1:
+            return [{**messages[-1], "content": self.trim_to(messages[-1].get("content", ""), 1)}]
+        notice = {"role": "user", "content": "[Earlier messages truncated]"}
+        notice_tokens = estimate_tokens(notice["content"])
+        include_notice = token_limit >= notice_tokens + 3
+        available = token_limit - (notice_tokens if include_notice else 0)
+        first_limit = token_counts[0] if token_counts[0] + token_counts[-1] <= available else min(token_counts[0], max(1, available // 3))
+        first = {**messages[0], "content": self.trim_to(messages[0].get("content", ""), first_limit)}
+        remaining = available - estimate_tokens(first["content"])
+        latest = {**messages[-1], "content": _bounded_text(messages[-1].get("content", ""), remaining, keep_tail=True)}
+        remaining -= estimate_tokens(latest["content"])
+        selected = [latest]
+        for msg in reversed(messages[1:-1]):
+            cost = estimate_tokens(msg.get("content", ""))
+            if cost > remaining:
+                break
+            selected.append(msg)
+            remaining -= cost
+        return [first, *([notice] if include_notice else []), *reversed(selected)]
 
     def fit_all(
         self,

@@ -401,7 +401,7 @@ class TestAgentWithChildren:
 
     def test_background_task_notification_arrives_later(self, tmp_path):
         """
-        父 Agent spawn fork（后台模式），继续执行其他步骤，
+        父 Agent spawn explore（后台模式），继续执行其他步骤，
         后续步骤中收到子 Agent 完成通知。
         """
         parent_registry = (
@@ -430,15 +430,16 @@ class TestAgentWithChildren:
 
         parent_registry.register(task_tool)
 
-        # 父：先 spawn fork（后台），再做其他事，最后收结果
+        from tools.task_control import TaskWaitTool
+        parent_registry.register(TaskWaitTool(task_registry))
+        # Wait explicitly and let the next model call consume child findings.
         parent_backend = MockBackend([
-            # Step 1: spawn fork
-            Action(ActionType.TOOL_CALL, "spawn fork",
-                   ToolCall("task", {"type": "fork", "task": "Background analysis", "wait": False})),
+            Action(ActionType.TOOL_CALL, "spawn explore",
+                   ToolCall("task", {"type": "explore", "task": "Background analysis", "wait": False})),
             # Step 2: 做其他事
             Action(ActionType.TOOL_CALL, "reading something",
                    ToolCall("file_read", {"path": "main.py"})),
-            # Step 3: FINISH
+            Action(ActionType.TOOL_CALL, "wait for findings", ToolCall("task_wait", {"timeout": 5})),
             Action(ActionType.FINISH, "work done", message="All work completed"),
         ])
 
@@ -451,6 +452,7 @@ class TestAgentWithChildren:
             result = agent.run(task, log)
 
         assert result.is_success()
+        assert any("Background task result" in m.content for m in parent_backend.received_messages[-1])
 
 
 # ============================================================================
