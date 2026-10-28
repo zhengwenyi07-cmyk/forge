@@ -25,7 +25,7 @@ def main():
             (repo / ".gitignore").write_bytes(b"__pycache__/\n.pytest_cache/\n")
             for args in [["init"], ["config", "user.name", "Smoke"], ["config", "user.email", "smoke@example.invalid"], ["config", "core.autocrlf", "false"], ["add", "."], ["commit", "-m", "baseline"]]:
                 subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
-            runtime = create_runtime(repo_path=str(repo))
+            runtime = create_runtime(repo_path=str(repo), **cfg.runtime.options())
             try:
                 assert runtime.preflight().success
                 backend = OpenAICompatBackend(model, cfg.llm.api_key, cfg.llm.base_url, max_tokens=8192)

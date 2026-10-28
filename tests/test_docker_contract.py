@@ -53,3 +53,30 @@ def test_fork_with_docker_mounts_the_correct_git_metadata(real_repo):
     assert "+VALUE = 2" in result.patch
     assert (real_repo / "app.py").read_bytes() == b"VALUE = 1\n"
     assert result.validation[-1]["success"]
+
+
+def test_project_dependencies_are_installed_and_checked_before_network_disconnect(tmp_path):
+    import zipfile
+    from tools.runtime import create_runtime
+    wheel = tmp_path / "forge_test_dep-1.0-py3-none-any.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr("forge_test_dep/__init__.py", "VALUE = 42\n")
+        archive.writestr("forge_test_dep-1.0.dist-info/METADATA", "Metadata-Version: 2.1\nName: forge-test-dep\nVersion: 1.0\n")
+        archive.writestr("forge_test_dep-1.0.dist-info/WHEEL", "Wheel-Version: 1.0\nGenerator: forge-test\nRoot-Is-Purelib: true\nTag: py3-none-any\n")
+        archive.writestr("forge_test_dep-1.0.dist-info/RECORD", "")
+    (tmp_path / "requirements.txt").write_text("./" + wheel.name + "\n")
+    check = "python -c 'import forge_test_dep; assert forge_test_dep.VALUE == 42'"
+    with create_runtime(repo_path=str(tmp_path), check_cmds=[check]) as runtime:
+        result = runtime.preflight()
+        assert result.success, result.stderr
+        assert runtime.exec(check).success
+        assert "00000000" not in runtime.exec("cat /proc/net/route").stdout
+
+
+def test_failed_environment_check_stops_before_agent_execution(tmp_path):
+    from tools.runtime import create_runtime
+    with create_runtime(repo_path=str(tmp_path), setup_cmds=[], check_cmds=["python -c 'import definitely_missing_forge_module'"]) as runtime:
+        result = runtime.preflight()
+        assert not result.success
+        assert "Environment preparation failed" in result.stderr
+        assert not runtime.is_running

@@ -248,7 +248,7 @@ def cli(ctx: click.Context, config: str | None) -> None:
 @click.option("--model", "-m", default=None, help="Override LLM model name")
 @click.option("--provider", "-p", default=None, help="Override LLM provider")
 @click.option("--max-steps", default=None, type=int, help="Override max steps")
-@click.option("--stream", "-s", is_flag=True, default=True, help="Enable streaming output (default: on)")
+@click.option("--stream/--no-stream", "-s", default=True, help="Enable streaming output (default: on)")
 @click.option("--confirm", is_flag=True, default=False, help="Ask confirmation before running dangerous shell commands")
 @click.option("--sandbox/--no-sandbox", default=True, help="Use Linux Docker by default; --no-sandbox requires Linux/WSL")
 @click.option("--task-type", type=click.Choice(["modify", "read_only"]), default="modify")
@@ -333,7 +333,7 @@ def run(
     from tools.runtime import create_runtime
     confirm_cb = terminal_confirm if confirm else None
     try:
-        runtime = create_runtime(sandbox=sandbox, repo_path=str(repo_path))
+        runtime = create_runtime(sandbox=sandbox, repo_path=str(repo_path), **config.runtime.options())
         if sandbox:
             check = runtime.preflight()
             if not check.success:
@@ -503,7 +503,7 @@ def chat(
     from multi_agent.task_registry import TaskRegistry
     task_registry = TaskRegistry()
     try:
-        runtime = create_runtime(sandbox=sandbox, repo_path=str(repo_path))
+        runtime = create_runtime(sandbox=sandbox, repo_path=str(repo_path), **config.runtime.options())
         if sandbox:
             check = runtime.preflight()
             if not check.success:
@@ -518,7 +518,7 @@ def chat(
         )
     else:
         registry = _build_registry(
-            config, confirm_callback=terminal_confirm,
+            config, confirm_callback=terminal_confirm, runtime=runtime,
             task_registry=task_registry, backend=backend, repo_path=str(repo_path),
         )
     session = ChatSession(

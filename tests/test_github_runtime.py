@@ -24,5 +24,5 @@ def test_issue_entry_uses_linux_runtime_and_cleans_it_up(tmp_path, monkeypatch):
     monkeypatch.setattr("tools.runtime.create_runtime", create)
     monkeypatch.setattr("agent.core.Agent.run", lambda *a: RunResult("x", RunStatus.GAVE_UP, "stop", 1))
     assert entry.run_on_issue("owner/repo", 1, str(tmp_path), create_pr=False) == 1
-    assert seen == [{"sandbox": True, "repo_path": str(tmp_path)}]
+    assert seen == [{"sandbox": True, "repo_path": str(tmp_path), **cfg.runtime.options()}]
     runtime.cleanup.assert_called_once()

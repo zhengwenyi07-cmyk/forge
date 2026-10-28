@@ -174,15 +174,12 @@ SANDBOX_IMAGE = "forge-runtime:py311"
 # 容器内 repo 的挂载路径
 CONTAINER_WORKDIR = "/workspace"
 
-# 默认初始化命令：容器启动后自动安装工具依赖
-# 让沙箱"注入工具"的环节真正生效：
-#   - apt-get git → GitTool 的 git_status/git_diff/git_add/git_commit 可以工作
-#   - pip install pytest → PytestTool 可以运行测试
-#   - -qq / -q 静默安装，减少日志噪音
-#   用户可以通过 DockerRuntime(setup_cmds=...) 自定义覆盖
+# Git identity is prepared before project installation. create_runtime detects
+# project dependencies; explicit setup_cmds can select a custom environment.
 DEFAULT_SETUP_CMDS = [
-    "apt-get update -qq && apt-get install -y -qq --no-install-recommends git",
-    "pip install -q pytest",
+    "git config --global safe.directory '*'",
+    "git config --global user.email agent@forge.dev",
+    "git config --global user.name 'Forge Agent'",
 ]
 
 
@@ -211,11 +208,15 @@ class DockerRuntime(Runtime):
         image: str = SANDBOX_IMAGE,
         extra_mounts: list[tuple[str, str]] | None = None,
         setup_cmds: list[str] | None = None,
+        check_cmds: list[str] | None = None,
+        setup_timeout: int = 600,
     ) -> None:
         self._repo_path = str(Path(repo_path).resolve())
         self._image = image
         self._extra_mounts = extra_mounts or []
         self._setup_cmds = list(setup_cmds or [])
+        self._check_cmds = list(check_cmds or [])
+        self._setup_timeout = setup_timeout
         self._environment: dict[str, str] = {}
         self._workdir = CONTAINER_WORKDIR
         self._command_prefix = ""
@@ -410,23 +411,27 @@ class DockerRuntime(Runtime):
         logger.info("Container started: %s", self._container_id[:12])
 
         # 执行初始化命令
-        for setup_cmd in self._setup_cmds:
-            result = self.exec(setup_cmd, timeout=120)
+        for setup_cmd in [*self._setup_cmds, *self._check_cmds]:
+            result = self.exec(setup_cmd, timeout=self._setup_timeout)
             if not result.success:
                 self.cleanup()
-                return RunResult(-1, result.stdout, f"Setup failed: {setup_cmd}\n{result.stderr}")
+                return RunResult(-1, result.stdout, f"Environment preparation failed: {setup_cmd}\n{result.output}\nConfigure runtime.image/setup_commands/check_commands for this project.")
 
         # setup 完成后断网，恢复沙箱隔离
         # 只有初始有网络（_allow_network=True）且设了 post-setup 断网时才执行
         if self._allow_network and self._disconnect_after_setup:
             try:
-                subprocess.run(
+                disconnect = subprocess.run(
                     ["docker", "network", "disconnect", "bridge", self._container_name],
                     capture_output=True, timeout=10,
                 )
+                if disconnect.returncode:
+                    self.cleanup()
+                    return RunResult(-1, "", "Could not disconnect network after environment preparation")
                 logger.info("Disconnected container from network (post-setup isolation)")
             except Exception as e:
-                logger.warning("Failed to disconnect network after setup: %s", e)
+                self.cleanup()
+                return RunResult(-1, "", f"Failed to disconnect network after setup: {e}")
 
         return None   # 成功
 
@@ -434,7 +439,8 @@ class DockerRuntime(Runtime):
         return self.exec("python --version && git --version", timeout=30)
 
     def for_repo(self, repo_path: str, extra_mounts=None, environment=None):
-        runtime = DockerRuntime(repo_path, image=self._image, setup_cmds=list(self._setup_cmds), extra_mounts=extra_mounts)
+        runtime = DockerRuntime(repo_path, image=self._image, setup_cmds=list(self._setup_cmds), extra_mounts=extra_mounts,
+                                check_cmds=self._check_cmds, setup_timeout=self._setup_timeout)
         runtime._allow_network = self._allow_network
         runtime._disconnect_after_setup = self._disconnect_after_setup
         runtime._environment = dict(environment or {})
@@ -463,6 +469,8 @@ def create_runtime(
     image: str = SANDBOX_IMAGE,
     network: bool = True,
     setup_cmds: list[str] | None = None,
+    check_cmds: list[str] | None = None,
+    setup_timeout: int = 600,
 ) -> Runtime:
     """
     根据配置创建合适的 Runtime。
@@ -472,8 +480,10 @@ def create_runtime(
         repo_path:  sandbox=True 时必须提供
         image:      Docker 镜像名
         network:    sandbox 模式下是否允许网络（默认 True，因为 setup_cmds 需要网络安装依赖）
-        setup_cmds: 容器启动后执行的初始化命令。默认使用 DEFAULT_SETUP_CMDS 安装 git + pytest
-                   传 [] 或空列表则跳过初始化
+        setup_cmds: None 时根据 requirements/pyproject/setup.py/package.json 安装项目依赖；
+                    [] 表示使用预装依赖。Git 配置仍会执行。
+        check_cmds: 安装完成后执行的环境检查，默认 python -m pip check。
+        setup_timeout: 每条安装/检查命令的超时秒数。全部成功后才断网执行任务。
 
     Returns:
         Runtime 实例
@@ -486,15 +496,29 @@ def create_runtime(
     if not repo_path:
         raise ValueError("repo_path is required when sandbox=True")
 
-    if setup_cmds is None:
-        setup_cmds = ["git config --global safe.directory '*'", "git config --global user.email agent@forge.dev", "git config --global user.name 'Forge Agent'"]
+    project_setup = detect_project_setup(Path(repo_path)) if setup_cmds is None else list(setup_cmds)
 
     runtime = DockerRuntime(
         repo_path=repo_path,
         image=image,
-        setup_cmds=setup_cmds,
+        setup_cmds=[*DEFAULT_SETUP_CMDS, *project_setup],
+        check_cmds=check_cmds if check_cmds is not None else ["python -m pip check"],
+        setup_timeout=setup_timeout,
     )
     if network:
         runtime._allow_network = True
 
     return runtime
+
+
+def detect_project_setup(repo: Path) -> list[str]:
+    commands = []
+    if (repo / "requirements.txt").is_file():
+        commands.append("python -m pip install -r requirements.txt")
+    if (repo / "pyproject.toml").is_file() or (repo / "setup.py").is_file():
+        commands.append("python -m pip install -e .")
+    if (repo / "package-lock.json").is_file():
+        commands.append("npm ci")
+    elif (repo / "package.json").is_file():
+        commands.append("npm install")
+    return commands

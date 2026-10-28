@@ -112,6 +112,19 @@ class ContextConfig:
 
 
 @dataclass
+class RuntimeConfig:
+    image: str = "forge-runtime:py311"
+    setup_commands: list[str] | None = None  # None: detect Python/npm metadata; []: prebuilt environment
+    check_commands: list[str] = field(default_factory=lambda: ["python -m pip check"])
+    setup_network: bool = True
+    setup_timeout: int = 600
+
+    def options(self):
+        return {"image": self.image, "setup_cmds": self.setup_commands, "check_cmds": self.check_commands,
+                "network": self.setup_network, "setup_timeout": self.setup_timeout}
+
+
+@dataclass
 class AppConfig:
     """
     顶层应用配置（所有配置的根容器）。
@@ -123,6 +136,7 @@ class AppConfig:
     agent: AgentCfg = field(default_factory=AgentCfg)
     tools: ToolsConfig = field(default_factory=ToolsConfig)
     context: ContextConfig = field(default_factory=ContextConfig)
+    runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
 
 
 # ===========================================================================
@@ -260,7 +274,21 @@ def _parse(data: dict[str, Any]) -> AppConfig:
         history_window=int(context_raw.get("history_window", 20)),
     )
 
-    return AppConfig(llm=llm, agent=agent, tools=tools, context=context)
+    runtime_raw = data.get("runtime", {})
+    for key in ("setup_commands", "check_commands"):
+        value = runtime_raw.get(key)
+        if value is not None and (not isinstance(value, list) or not all(isinstance(item, str) and item.strip() for item in value)):
+            raise ValueError(f"runtime.{key} must be a list of nonempty commands")
+    runtime = RuntimeConfig(
+        image=runtime_raw.get("image", "forge-runtime:py311"),
+        setup_commands=runtime_raw.get("setup_commands"),
+        check_commands=runtime_raw.get("check_commands", ["python -m pip check"]),
+        setup_network=runtime_raw.get("setup_network", True),
+        setup_timeout=int(runtime_raw.get("setup_timeout", 600)),
+    )
+    if type(runtime.setup_network) is not bool or runtime.setup_timeout < 1:
+        raise ValueError("Runtime setup_network must be boolean and setup_timeout must be positive")
+    return AppConfig(llm=llm, agent=agent, tools=tools, context=context, runtime=runtime)
 
 
 def merge_cli_overrides(

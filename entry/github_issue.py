@@ -320,7 +320,7 @@ def run_on_issue(
 
     from entry.cli import _build_registry
     from tools.runtime import create_runtime
-    runtime = create_runtime(sandbox=True, repo_path=local_path)
+    runtime = create_runtime(sandbox=True, repo_path=local_path, **config.runtime.options())
     preflight = runtime.preflight()
     if not preflight.success:
         runtime.cleanup()

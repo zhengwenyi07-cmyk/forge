@@ -12,3 +12,11 @@ agent:
 context:
   repo_map_budget: 8000
   history_window: 20
+runtime:
+  image: forge-runtime:py311
+  # null: install dependencies from repository metadata; []: prebuilt environment
+  setup_commands: null
+  check_commands:
+    - python -m pip check
+  setup_network: true
+  setup_timeout: 600
