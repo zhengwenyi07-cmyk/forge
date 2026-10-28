@@ -55,6 +55,7 @@ class LLMResponse:
     raw_content: str                    # LLM 原始文本输出，调试用
     input_tokens: int = 0
     output_tokens: int = 0
+    usage_source: str = "provider"
 
     @property
     def total_tokens(self) -> int:

@@ -383,6 +383,7 @@ def _stream_with_tools(self, api_messages, tools, on_text, on_thought=None):
         max_tokens=self._max_tokens,
         messages=api_messages,
         stream=True,
+        stream_options={"include_usage": True},
     )
     if api_tools:
         kwargs["tools"] = api_tools
@@ -395,9 +396,12 @@ def _stream_with_tools(self, api_messages, tools, on_text, on_thought=None):
     full_reasoning = ""  # reasoning_content（推理模型专有）
     finish_reason = None
     tool_calls_raw = []      # 收集 tool call deltas
+    usage = None
 
     stream = self._client.chat.completions.create(**kwargs)
     for chunk in stream:
+        if getattr(chunk, "usage", None) is not None:
+            usage = chunk.usage
         choice = chunk.choices[0] if chunk.choices else None
         if not choice:
             continue
@@ -460,16 +464,16 @@ def _stream_with_tools(self, api_messages, tools, on_text, on_thought=None):
             message=action.message,
         )
 
-    # 流式模式拿不到精确 token 数，估算
-    from context.token_budget import estimate_tokens
-    input_tokens = sum(estimate_tokens(m.get("content", "")) for m in api_messages)
-    output_tokens = estimate_tokens(full_text)
+    input_tokens, output_tokens, usage_source = _stream_usage(
+        usage, api_messages, api_tools, full_text, full_reasoning, tool_calls_raw,
+    )
 
     return LLMResponse(
         action=action,
         raw_content=full_text,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
+        usage_source=usage_source,
     )
 
 
@@ -484,17 +488,23 @@ def _stream_text_only(self, api_messages, tools, on_text):
         }
 
     full_text = ""
+    full_reasoning = ""
+    usage = None
     stream = self._client.chat.completions.create(
         model=self._model,
         max_tokens=self._max_tokens,
         messages=augmented,
         stream=True,
+        stream_options={"include_usage": True},
     )
     for chunk in stream:
+        if getattr(chunk, "usage", None) is not None:
+            usage = chunk.usage
         choice = chunk.choices[0] if chunk.choices else None
         if not choice:
             continue
         delta = choice.delta
+        full_reasoning += getattr(delta, "reasoning_content", None) or ""
         if delta.content:
             full_text += delta.content
             if on_text:
@@ -502,12 +512,28 @@ def _stream_text_only(self, api_messages, tools, on_text):
 
     action = _parse_text_response(full_text)
 
-    from context.token_budget import estimate_tokens
+    input_tokens, output_tokens, usage_source = _stream_usage(usage, augmented, [], full_text, full_reasoning, [])
     return LLMResponse(
         action=action,
         raw_content=full_text,
-        input_tokens=sum(estimate_tokens(m.get("content", "")) for m in augmented),
-        output_tokens=estimate_tokens(full_text),
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        usage_source=usage_source,
+    )
+
+
+def _stream_usage(usage, messages, tools, text, reasoning, tool_calls):
+    if usage is not None:
+        prompt = getattr(usage, "prompt_tokens", None)
+        completion = getattr(usage, "completion_tokens", None)
+        if type(prompt) is int and type(completion) is int:
+            return prompt, completion, "provider"
+    from context.token_budget import estimate_tokens
+    logger.warning("Provider omitted stream usage; estimating messages, schemas, reasoning and tool arguments")
+    return (
+        estimate_tokens(json.dumps({"messages": messages, "tools": tools}, ensure_ascii=False)),
+        estimate_tokens(text + reasoning + json.dumps(tool_calls, ensure_ascii=False)),
+        "estimated",
     )
 
 
