@@ -12,6 +12,8 @@ pytest 执行工具，返回结构化的测试结果。
 from __future__ import annotations
 
 import re
+import shlex
+import sys
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -54,6 +56,7 @@ class PytestTool(BaseTool):
         return {
             "type": "object",
             "properties": {
+                "command": {"type": "string", "description": "Explicit targeted test or reproduction command, including non-pytest projects."},
                 "path": {
                     "type": "string",
                     "description": "Test file or directory to run (default: 'tests/' or '.')",
@@ -76,7 +79,8 @@ class PytestTool(BaseTool):
 
         # 决定测试路径
         test_path = params.get("path", "")
-        if not test_path:
+        command = params.get("command", "")
+        if not test_path and not command:
             if (cwd_path / "tests").exists():
                 test_path = "tests/"
             else:
@@ -92,7 +96,7 @@ class PytestTool(BaseTool):
 
         # 组装命令：--tb=short 足够 agent 理解，--no-header 减少噪音
         cmd_parts = [
-            "python", "-m", "pytest",
+            "python", "-B", "-m", "pytest",
             test_path,
             "--tb=short",
             "--no-header",
@@ -101,7 +105,9 @@ class PytestTool(BaseTool):
         if extra_args:
             cmd_parts.extend(extra_args.split())
 
-        cmd_str = " ".join(cmd_parts)
+        if isinstance(self._runtime, LocalRuntime):
+            cmd_parts[0] = sys.executable
+        cmd_str = command or (subprocess.list2cmdline(cmd_parts) if __import__('os').name == 'nt' and isinstance(self._runtime, LocalRuntime) else shlex.join(cmd_parts))
         run_result = self._runtime.exec(cmd_str, cwd=cwd, timeout=PYTEST_TIMEOUT)
         if "timed out" in run_result.stderr.lower():
             return ToolResult(

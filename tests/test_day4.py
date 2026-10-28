@@ -232,7 +232,7 @@ class TestAnthropicBackend:
         assert result.action.tool_call.params == {"cmd": "pytest tests/"}
         assert "I will run" in result.action.thought
 
-    def test_end_turn_response_is_finish(self):
+    def test_end_turn_requires_explicit_finish(self):
         backend = self._make_backend()
         response = self._make_response("end_turn", [
             self._make_text_block("The task is complete. I fixed the bug."),
@@ -240,9 +240,9 @@ class TestAnthropicBackend:
         backend._client.messages.create.return_value = response
 
         result = backend.complete(make_messages("user", "fix it"), [])
-        assert result.action.action_type == ActionType.FINISH
+        assert result.action.action_type == ActionType.REFLECTION
 
-    def test_max_tokens_is_give_up(self):
+    def test_max_tokens_can_continue(self):
         backend = self._make_backend()
         response = self._make_response("max_tokens", [
             self._make_text_block("..."),
@@ -250,7 +250,7 @@ class TestAnthropicBackend:
         backend._client.messages.create.return_value = response
 
         result = backend.complete(make_messages("user", "fix it"), [])
-        assert result.action.action_type == ActionType.GIVE_UP
+        assert result.action.action_type == ActionType.REFLECTION
 
     def test_system_message_sent_separately(self):
         backend = self._make_backend()
@@ -328,21 +328,21 @@ class TestOpenAICompatBackend:
         assert result.action.tool_call.name == "shell"
         assert result.action.tool_call.params == {"cmd": "pytest"}
 
-    def test_stop_response_is_finish(self):
+    def test_stop_requires_explicit_finish(self):
         backend = self._make_backend()
         response = self._make_response("stop", content="Task is done.")
         backend._client.chat.completions.create.return_value = response
 
         result = backend.complete(make_messages("user", "fix it"), [])
-        assert result.action.action_type == ActionType.FINISH
+        assert result.action.action_type == ActionType.REFLECTION
 
-    def test_length_finish_reason_is_give_up(self):
+    def test_length_can_continue(self):
         backend = self._make_backend()
         response = self._make_response("length", content="...")
         backend._client.chat.completions.create.return_value = response
 
         result = backend.complete(make_messages("user", "fix it"), [])
-        assert result.action.action_type == ActionType.GIVE_UP
+        assert result.action.action_type == ActionType.REFLECTION
 
     def test_tools_converted_to_openai_format(self):
         backend = self._make_backend()
@@ -417,13 +417,13 @@ class TestTextFallback:
         result = backend.complete(make_messages("user", "fix it"), [])
         assert result.action.action_type == ActionType.GIVE_UP
 
-    def test_unparseable_text_is_give_up(self):
+    def test_unparseable_requests_another_action(self):
         backend = self._make_backend()
         backend._client.chat.completions.create.return_value = self._make_response(
             "I am thinking about the problem... hmm..."
         )
         result = backend.complete(make_messages("user", "fix it"), [])
-        assert result.action.action_type == ActionType.GIVE_UP
+        assert result.action.action_type == ActionType.REFLECTION
 
     def test_tool_description_injected_in_system(self):
         """R1 模式下，工具描述应注入 system prompt 而非 tools 参数。"""

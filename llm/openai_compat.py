@@ -110,6 +110,8 @@ class OpenAICompatBackend(LLMBackend):
             messages=api_messages,
             tools=api_tools,
             tool_choice="auto",
+            parallel_tool_calls=False,
+            temperature=0,
         )
 
         choice = response.choices[0]
@@ -155,6 +157,7 @@ class OpenAICompatBackend(LLMBackend):
             model=self._model,
             max_tokens=self._max_tokens,
             messages=augmented,
+            temperature=0,
         )
 
         choice = response.choices[0]
@@ -209,6 +212,8 @@ def _parse_openai_response(choice: Any, thought: str) -> Action:
     message = choice.message
 
     if finish_reason == "tool_calls" and message.tool_calls:
+        if len(message.tool_calls) != 1:
+            return Action(ActionType.REFLECTION, "Call exactly one tool per turn; no calls from this batch were executed.")
         # 取第一个 tool call（agent 每轮只调一个工具）
         tc = message.tool_calls[0]
         try:
@@ -223,21 +228,9 @@ def _parse_openai_response(choice: Any, thought: str) -> Action:
         )
 
     if finish_reason == "stop":
-        # 模型有内容输出 → 作为最终回答
-        if thought and thought != "(no thought)":
-            return Action(
-                action_type=ActionType.FINISH,
-                thought="",
-                message=thought,
-            )
-        # 模型没输出内容但正常结束了——任务已由前面的工具调用完成
-        # 例如 find_files 返回了结果，模型觉得不需要额外的话
-        # 这种情况应视为完成而非放弃
-        return Action(
-            action_type=ActionType.FINISH,
-            thought="",
-            message="Task complete.",
-        )
+        return Action(action_type=ActionType.REFLECTION, thought=thought)
+    if finish_reason == "length":
+        return Action(action_type=ActionType.REFLECTION, thought="Output was truncated. Continue using a smaller, complete tool call.")
 
     # length（token 超限）或其他
     return Action(
@@ -311,7 +304,9 @@ def _parse_text_response(text: str) -> Action:
     # 尝试提取 JSON block（```json ... ```）
     block_match = _JSON_BLOCK_RE.search(text)
     if block_match:
-        return _try_parse_tool_json(block_match.group(1), thought=text_stripped)
+        parsed = _try_parse_tool_json(block_match.group(1), thought=text_stripped)
+        if parsed is not None:
+            return parsed
 
     # 尝试提取内联 JSON
     for m in _INLINE_JSON_RE.finditer(text):
@@ -321,12 +316,6 @@ def _parse_text_response(text: str) -> Action:
 
     # 关键词匹配兜底
     text_lower = text.lower()
-    if any(kw in text_lower for kw in _FINISH_KEYWORDS):
-        return Action(
-            action_type=ActionType.FINISH,
-            thought=text_stripped,
-            message=text_stripped,
-        )
     if any(kw in text_lower for kw in _GIVE_UP_KEYWORDS):
         return Action(
             action_type=ActionType.GIVE_UP,
@@ -336,11 +325,7 @@ def _parse_text_response(text: str) -> Action:
 
     # 无法解析，GIVE_UP
     logger.warning("Could not parse action from text: %s", text_stripped[:100])
-    return Action(
-        action_type=ActionType.GIVE_UP,
-        thought=text_stripped,
-        message="Could not parse a valid action from model output",
-    )
+    return Action(action_type=ActionType.REFLECTION, thought=text_stripped)
 
 
 def _try_parse_tool_json(json_str: str, thought: str) -> Action | None:
@@ -402,6 +387,8 @@ def _stream_with_tools(self, api_messages, tools, on_text, on_thought=None):
     if api_tools:
         kwargs["tools"] = api_tools
         kwargs["tool_choice"] = "auto"
+        kwargs["parallel_tool_calls"] = False
+        kwargs["temperature"] = 0
 
     # 收集流式 chunks
     full_text = ""

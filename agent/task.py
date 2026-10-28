@@ -143,6 +143,7 @@ class TaskNotification:
     summary: str                    # 结果摘要 / 错误信息
     steps_taken: int = 0            # 子 agent 消耗的步数
     total_tokens: int = 0           # 子 agent 消耗的 token 数
+    patch: str | None = None
 
 
 # ============================================================================
@@ -184,6 +185,12 @@ class Task:
     # 整次运行的 token 预算（包含 system + repo_map + history + observation + 15% 预留）。
     # 默认 80_000，对应 TokenBudget.default_plan() 的分配基准
     budget_tokens: int = 80_000
+    # Explicit contract: analysis tasks can finish without a patch or tests.
+    task_type: str = "modify"
+
+    def __post_init__(self):
+        if self.task_type not in ("modify", "read_only"):
+            raise ValueError("task_type must be modify or read_only")
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -408,6 +415,7 @@ class RunResult:
     # Agent.run() 在返回前调用 _get_git_diff() 抓取。
     # 如果 repo 中没有修改或 git 命令失败，为 None
     patch: str | None = None
+    validation: list[dict[str, Any]] = field(default_factory=list)
     # status == FAILED 时的底层错误信息（如 LLM 调用的具体异常文本）
     error: str | None = None
 

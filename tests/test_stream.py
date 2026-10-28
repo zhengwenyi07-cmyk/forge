@@ -103,7 +103,7 @@ class TestCoreStreamPath:
         )
         registry = ToolRegistry().register(NoopTool("shell"))
         agent = Agent(backend, registry, cfg)
-        task = Task(task_id="st1", description="fix", repo_path=str(tmp_path), max_steps=3)
+        task = Task(task_type="read_only", task_id="st1", description="fix", repo_path=str(tmp_path), max_steps=3)
 
         with EventLog.create(task, log_dir=str(tmp_path / "logs")) as log:
             result = agent.run(task, log)
@@ -129,7 +129,7 @@ class TestCoreStreamPath:
         cfg = AgentConfig(stream=False)
         registry = ToolRegistry().register(NoopTool("shell"))
         agent = Agent(backend, registry, cfg)
-        task = Task(task_id="st2", description="fix", repo_path=str(tmp_path), max_steps=3)
+        task = Task(task_type="read_only", task_id="st2", description="fix", repo_path=str(tmp_path), max_steps=3)
 
         with EventLog.create(task, log_dir=str(tmp_path / "logs")) as log:
             result = agent.run(task, log)
@@ -154,7 +154,7 @@ class TestCoreStreamPath:
         )
         registry = ToolRegistry().register(NoopTool("shell"))
         agent = Agent(backend, registry, cfg)
-        task = Task(task_id="st3", description="fix", repo_path=str(tmp_path), max_steps=5)
+        task = Task(task_type="read_only", task_id="st3", description="fix", repo_path=str(tmp_path), max_steps=5)
 
         with EventLog.create(task, log_dir=str(tmp_path / "logs")) as log:
             agent.run(task, log)
@@ -169,7 +169,7 @@ class TestCoreStreamPath:
         cfg = AgentConfig(stream=True, stream_callback=None)
         registry = ToolRegistry().register(NoopTool("shell"))
         agent = Agent(backend, registry, cfg)
-        task = Task(task_id="st4", description="fix", repo_path=str(tmp_path), max_steps=3)
+        task = Task(task_type="read_only", task_id="st4", description="fix", repo_path=str(tmp_path), max_steps=3)
 
         with EventLog.create(task, log_dir=str(tmp_path / "logs")) as log:
             result = agent.run(task, log)
@@ -195,7 +195,7 @@ class TestCoreStreamPath:
         cfg = AgentConfig(stream=True, llm_max_retries=3, llm_retry_delay=0.01)
         registry = ToolRegistry().register(NoopTool("shell"))
         agent = Agent(base_backend, registry, cfg)
-        task = Task(task_id="st5", description="fix", repo_path=str(tmp_path), max_steps=3)
+        task = Task(task_type="read_only", task_id="st5", description="fix", repo_path=str(tmp_path), max_steps=3)
 
         with EventLog.create(task, log_dir=str(tmp_path / "logs")) as log:
             result = agent.run(task, log)

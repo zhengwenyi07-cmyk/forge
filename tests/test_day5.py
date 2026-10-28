@@ -335,7 +335,7 @@ class TestConversationHistory:
 
 class TestCoreWithContext:
     def _make_task(self, tmp_path) -> Task:
-        return Task(
+        return Task(task_type="read_only",
             task_id="ctx001",
             description="Fix the bug",
             repo_path=str(tmp_path),

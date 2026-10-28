@@ -30,7 +30,7 @@ from tools.base import FailingTool, NoopTool, ToolRegistry
 
 @pytest.fixture
 def task(tmp_path) -> Task:
-    return Task(
+    return Task(task_type="read_only",
         task_id="test0001",
         description="Fix the failing test",
         repo_path=str(tmp_path),
@@ -257,7 +257,7 @@ class TestAgentGiveUp:
 
 class TestAgentMaxSteps:
     def test_max_steps_returns_correct_status(self, tmp_path):
-        task = Task(
+        task = Task(task_type="read_only",
             task_id="maxtest",
             description="run forever",
             repo_path=str(tmp_path),
@@ -284,7 +284,7 @@ class TestAgentMaxSteps:
     def test_max_steps_event_logged(self, tmp_path):
         from agent.task import EventType
 
-        task = Task(
+        task = Task(task_type="read_only",
             task_id="maxtest2",
             description="run forever",
             repo_path=str(tmp_path),
@@ -309,7 +309,7 @@ class TestAgentMaxSteps:
 
 class TestLoopDetection:
     def test_loop_detected_gives_up(self, tmp_path):
-        task = Task(
+        task = Task(task_type="read_only",
             task_id="looptest",
             description="infinite loop",
             repo_path=str(tmp_path),
@@ -354,7 +354,7 @@ class TestReflectionTestFailed:
     def test_reflection_triggered_on_test_failure(self, tmp_path):
         from agent.task import EventType
 
-        task = Task(
+        task = Task(task_type="read_only",
             task_id="refltest",
             description="fix tests",
             repo_path=str(tmp_path),
@@ -386,7 +386,7 @@ class TestReflectionTestFailed:
 
     def test_reflection_injected_into_history(self, tmp_path):
         """Reflection 后，LLM 收到的下一条 messages 应包含 reflection prompt。"""
-        task = Task(
+        task = Task(task_type="read_only",
             task_id="reflhist",
             description="fix tests",
             repo_path=str(tmp_path),
@@ -423,7 +423,7 @@ class TestReflectionNoEdit:
     def test_reflection_triggered_after_no_edit_steps(self, tmp_path):
         from agent.task import EventType
 
-        task = Task(
+        task = Task(task_type="read_only",
             task_id="noedit",
             description="explore forever",
             repo_path=str(tmp_path),

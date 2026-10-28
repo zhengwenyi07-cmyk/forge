@@ -84,6 +84,7 @@ class AnthropicBackend(LLMBackend):
             kwargs["system"] = system_content
         if api_tools:
             kwargs["tools"] = api_tools
+            kwargs["tool_choice"] = {"type": "auto", "disable_parallel_tool_use": True}
 
         logger.debug(
             "Anthropic request: model=%s messages=%d tools=%d",
@@ -169,6 +170,8 @@ def _parse_anthropic_response(response: Any) -> Action:
     thought = _extract_text(response).strip() or "(no thought)"
 
     if response.stop_reason == "tool_use":
+        if sum(getattr(b, "type", None) == "tool_use" for b in response.content) != 1:
+            return Action(ActionType.REFLECTION, "Call exactly one tool per turn; no calls from this batch were executed.")
         # 找第一个 tool_use block
         for block in response.content:
             if block.type == "tool_use":
@@ -188,20 +191,9 @@ def _parse_anthropic_response(response: Any) -> Action:
         )
 
     if response.stop_reason == "end_turn":
-        # 检查 text 内容是否包含任务完成的意图
-        # 简单判断：有文字内容就认为是 FINISH
-        if thought and thought != "(no thought)":
-            return Action(
-                action_type=ActionType.FINISH,
-                thought=thought,
-                message=thought,
-            )
-        # 模型正常结束但没内容——视为完成（任务已由工具调用完成）
-        return Action(
-            action_type=ActionType.FINISH,
-            thought="",
-            message="Task complete.",
-        )
+        return Action(action_type=ActionType.REFLECTION, thought=thought)
+    if response.stop_reason == "max_tokens":
+        return Action(action_type=ActionType.REFLECTION, thought="Output truncated. Continue with a smaller tool call.")
 
     # max_tokens 或其他 stop_reason
     return Action(
@@ -225,6 +217,7 @@ def _anthropic_stream(
     messages: list,
     tools: list,
     on_text: StreamCallback | None = None,
+    on_thought: StreamCallback | None = None,
 ) -> LLMResponse:
     """
     Anthropic 流式调用实现。
@@ -252,6 +245,7 @@ def _anthropic_stream(
         kwargs["system"] = system_content
     if api_tools:
         kwargs["tools"] = api_tools
+        kwargs["tool_choice"] = {"type": "auto", "disable_parallel_tool_use": True}
 
     # 使用 stream() context manager
     with self._client.messages.stream(**kwargs) as stream:

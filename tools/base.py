@@ -142,6 +142,7 @@ class ToolRegistry:
 
         tool = self._tools[name]
         try:
+            validate_params(params, tool.parameters_schema)
             return tool.execute(params)
         except Exception as exc:
             # 工具内部未捕获的异常，降级为 error 结果
@@ -172,6 +173,28 @@ class ToolRegistry:
 
     def __repr__(self) -> str:
         return f"ToolRegistry(tools={self.tool_names})"
+
+
+def validate_params(params, schema, path="params"):
+    """Validate the schema subset used by Forge before tools cause side effects."""
+    expected = schema.get("type")
+    types = {"object": dict, "string": str, "integer": int, "number": (int, float), "boolean": bool, "array": list}
+    if expected in types and (not isinstance(params, types[expected]) or expected in ("integer", "number") and isinstance(params, bool)):
+        raise ValueError(f"{path} must be {expected}")
+    if "enum" in schema and params not in schema["enum"]:
+        raise ValueError(f"{path} must be one of {schema['enum']}")
+    if isinstance(params, dict):
+        for key in schema.get("required", []):
+            if key not in params:
+                raise ValueError(f"{path}.{key} is required")
+        for key, value in params.items():
+            if key in schema.get("properties", {}):
+                validate_params(value, schema["properties"][key], f"{path}.{key}")
+    if isinstance(params, str) and len(params) < schema.get("minLength", 0):
+        raise ValueError(f"{path} is too short")
+    if type(params) in (int, float):
+        if params < schema.get("minimum", float('-inf')) or params > schema.get("maximum", float('inf')):
+            raise ValueError(f"{path} is outside the allowed range")
 
 
 # ---------------------------------------------------------------------------

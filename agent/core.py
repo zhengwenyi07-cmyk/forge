@@ -115,6 +115,8 @@ class AgentConfig:
     # 可选的停止检查回调：每步循环开始时调用，返回 True 时 Agent 优雅终止。
     # SubAgent 使用此回调接收父线程的中断信号。
     stop_check: object = None  # Callable[[], bool] | None
+    message_source: object = None
+    system_prompt_override: str | None = None
 
 
 
@@ -146,6 +148,7 @@ class Agent:
         registry: ToolRegistry,
         config: AgentConfig | None = None,
         task_registry: "TaskRegistry | None" = None,
+        runtime=None,
     ) -> None:
         # LLM 后端实例（策略模式的具体策略，测试/生产可替换）
         self._backend = backend
@@ -153,6 +156,7 @@ class Agent:
         self._registry = registry
         # 多 Agent 任务注册中心（None = 单 Agent 模式，向后兼容）
         self._task_registry = task_registry
+        self._runtime = runtime
         # 运行时配置（熔断/重试/流式/确认参数）
         self._cfg = config or AgentConfig()
 
@@ -177,6 +181,9 @@ class Agent:
         # 记录 repo_path，供 _build_messages（system prompt 中的 repo 路径）
         # 和 _get_git_diff（git diff HEAD）使用
         self._current_repo_path = task.repo_path
+        initial_patch = self._get_git_diff(task.repo_path) if task.task_type == "modify" else None
+        tested_patch = None
+        test_attempts = []
         # 按 repo_path 隔离 repo_map 缓存，换 repo 时自动重建。
         # _repo_map_cache_key 与当前 task.repo_path 比较，
         # 不一致时删除缓存，下次 _build_messages 时重新构建。
@@ -198,7 +205,7 @@ class Agent:
             from agent.prompt import build_task_prompt
             history.add(LLMMessage(
                 role="user",
-                content=build_task_prompt(task.description, task.repo_path, task.issue_url),
+                content=build_task_prompt(task.description, self._runtime._workdir if self._runtime and self._runtime.name.startswith("docker") else task.repo_path, task.issue_url),
             ))
         # TokenBudget：从总预算算出各部分配额（default_plan()），
         # 在 _build_messages 中用 trim_history() 做 Token 维度的第二层裁剪
@@ -244,6 +251,11 @@ class Agent:
             # 每步开始时检查是否有后台子 Agent 已完成，
             # 如果有，将完成通知注入当前 history
             self._check_child_completions(history, log)
+            if self._cfg.message_source is not None:
+                for message in self._cfg.message_source():
+                    text = f"[PARENT MESSAGE]\n{message.content}"
+                    history.add(LLMMessage(role="user", content=text))
+                    log.log_reflection(step=step, reason="parent_message", prompt=text)
 
             # ── 阶段 1：上下文组装 ────────────────────────────────────
             # _build_messages = system prompt（含 repo-map 摘要）+ 裁剪后的 history
@@ -279,6 +291,15 @@ class Agent:
             log.log_action(step=step, action=action, raw_content=response.raw_content)
             logger.info("Step %d: %r", step, action)
 
+            if action.action_type == ActionType.TOOL_CALL and action.tool_call:
+                tc = action.tool_call
+                if tc.name in ("finish", "give_up"):
+                    key = "summary" if tc.name == "finish" else "reason"
+                    if not isinstance(tc.params, dict) or not isinstance(tc.params.get(key), str) or not tc.params[key].strip():
+                        history.add(LLMMessage(role="user", content=f"{tc.name} requires a nonempty {key}."))
+                        continue
+                    action = Action(ActionType.FINISH if tc.name == "finish" else ActionType.GIVE_UP, action.thought, message=tc.params[key])
+
             # ── 环节 A：死循环检测（第一种熔断） ─────────────────────
             # 比较最近 N 条 Action 的 (tool_name, params) 元组。
             # 元组完全一致 → 死循环 → 返回 GAVE_UP。
@@ -301,6 +322,29 @@ class Agent:
             if action.action_type == ActionType.FINISH:
                 summary = action.message or "Task complete."
                 patch = self._get_git_diff(task.repo_path)
+                blockers = []
+                if self._task_registry is not None:
+                    self._task_registry.poll()
+                    if self._task_registry.active_count():
+                        blockers.append("Child agents are still running; wait for their results before finishing.")
+                if task.task_type == "modify":
+                    if not patch or patch == initial_patch:
+                        blockers.append("Modification tasks require a new, nonempty diff. Existing changes do not count.")
+                    if patch and tested_patch != patch and task.test_cmd:
+                        result = self._registry.execute_tool("test", {"command": task.test_cmd, "cwd": task.repo_path})
+                        log.log_observation(step=step, observation=result.to_observation("test"))
+                        tested_patch = self._get_git_diff(task.repo_path)
+                        test_attempts.append({"command": task.test_cmd, "success": result.success, "output": result.output, "error": result.error})
+                    if not test_attempts or tested_patch != patch:
+                        blockers.append("Attempt a targeted test using the test tool after the last change. Supply path or command, then call finish again.")
+                if blockers:
+                    text = "[COMPLETION BLOCKED]\n" + "\n".join(blockers)
+                    log.log_reflection(step=step, reason="completion_gate", prompt=text)
+                    history.add(LLMMessage(role="assistant", content=self._format_action_for_history(action)))
+                    history.add(LLMMessage(role="user", content=text))
+                    continue
+                if test_attempts and not test_attempts[-1]["success"]:
+                    summary += "\nValidation: targeted test was attempted but did not pass; see validation results."
                 log.log_task_complete(steps=step, summary=summary)
                 return RunResult(
                     task_id=task.task_id,
@@ -309,6 +353,7 @@ class Agent:
                     steps_taken=step,
                     total_tokens=total_tokens,
                     patch=patch,
+                    validation=test_attempts,
                 )
 
             # LLM 主动放弃 → 记录失败原因 → 返回 GAVE_UP
@@ -330,35 +375,20 @@ class Agent:
                 # [拦截] 部分模型（DeepSeek 等）把 "call finish" 当作 function calling
                 # 目标，返回 tool_name="finish" 而非 finish_reason="stop"。
                 # 此处拦截并转换为正确的终端 Action。
-                if tc.name == "finish":
-                    summary = str(tc.params.get("summary", "") or action.thought or "Task complete.")
-                    patch = self._get_git_diff(task.repo_path)
-                    log.log_task_complete(steps=step, summary=summary)
-                    return RunResult(
-                        task_id=task.task_id, status=RunStatus.SUCCESS,
-                        summary=summary, steps_taken=step,
-                        total_tokens=total_tokens, patch=patch,
-                    )
-                if tc.name == "give_up":
-                    reason = str(tc.params.get("reason", "") or action.thought or "Agent gave up.")
-                    log.log_task_failed(steps=step, reason=reason)
-                    return RunResult(
-                        task_id=task.task_id, status=RunStatus.GAVE_UP,
-                        summary=reason, steps_taken=step,
-                        total_tokens=total_tokens,
-                    )
-
                 # ── 阶段 3：Tool Calling ──
                 # 通过 ToolRegistry 查找并执行工具。
                 # 工具不存在时返回 error ToolResult（不抛异常），Agent 继续运行。
                 # ToolResult → Observation：包装为 Agent 标准格式
                 result = self._registry.execute_tool(tc.name, tc.params)
                 observation = result.to_observation(tc.name)
+                if tc.name == "test" and (tc.params.get("path") or tc.params.get("command")):
+                    tested_patch = self._get_git_diff(task.repo_path)
+                    test_attempts.append({"params": tc.params, "success": result.success, "output": result.output, "error": result.error})
 
                 # 追踪文件编辑步数：
                 # file_write/file_edit/edit → 重置计数器
                 # 其他工具（shell/read/search/git/test）→ 累加
-                if tc.name in ("file_write", "file_edit", "edit"):
+                if result.success and tc.name in ("file_write", "file_edit", "apply_patch", "edit"):
                     steps_without_edit = 0
                 else:
                     steps_without_edit += 1
@@ -418,6 +448,7 @@ class Agent:
                     role="assistant",
                     content=action.thought,
                 ))
+                history.add(LLMMessage(role="user", content="Continue with a tool call, or explicitly call finish/give_up. Plain text does not finish a task."))
 
         # ── 环节 E：步数上限熔断（第三种熔断策略） ──────────────────
         # for 循环自然结束（step > task.max_steps）→ 返回 MAX_STEPS。
@@ -470,6 +501,7 @@ class Agent:
                 f"Status: {status_icon}\n"
                 f"Steps: {notif.steps_taken} | Tokens: {notif.total_tokens}\n"
                 f"Summary: {notif.summary}\n"
+                + (f"Child patch (review and apply with apply_patch):\n{notif.patch}\n" if notif.patch else "")
             )
             history.add(LLMMessage(role="user", content=notification_text))
             logger.info(
@@ -520,10 +552,12 @@ class Agent:
 
         # 渲染 system prompt：将 repo-map 摘要注入 {repo_summary} 占位符
         system_content = build_system_prompt(
-            repo_path=getattr(self, "_current_repo_path", "."),
+            repo_path=self._runtime._workdir if self._runtime and self._runtime.name.startswith("docker") else getattr(self, "_current_repo_path", "."),
             tools=schemas,
             repo_summary=self._repo_map_cache,
         )
+        if self._cfg.system_prompt_override:
+            system_content = self._cfg.system_prompt_override + "\n\n" + system_content
         # 缓存 system prompt（供 _update_task_tool_context 复用，避免重复生成）
         self._cached_system_prompt = system_content
         self._cached_repo_summary = self._repo_map_cache
@@ -646,13 +680,18 @@ class Agent:
         FINISH action 处理时调用（第 179 行、210 行）。
         RunResult.patch 字段包含此 diff，调用方（如 GitHub Issue 入口）可将其作为 PR 代码变更。
         """
-        import subprocess
+        from pathlib import Path
+        from tools import workspace
+        from tools.file_tool import _python_command
         try:
-            proc = subprocess.run(
-                ["git", "diff", "HEAD"],
-                capture_output=True, encoding="utf-8", errors="replace", timeout=10, cwd=repo_path,
-            )
-            diff = proc.stdout.strip()
-            return diff if diff else None
+            if self._runtime is None:
+                diff = workspace.capture_patch(repo_path)
+            else:
+                script = Path(workspace.__file__).read_text(encoding="utf-8") + "\nprint(capture_patch(), end='')\n"
+                result = self._runtime.exec(_python_command(script), cwd=repo_path, timeout=30)
+                if not result.success:
+                    return None
+                diff = result.stdout
+            return diff or None
         except Exception:
             return None

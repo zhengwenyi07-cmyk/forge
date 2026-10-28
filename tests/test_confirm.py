@@ -242,7 +242,7 @@ class TestConfirmInAgentFlow:
         registry = ToolRegistry().register(ShellTool(confirm_callback=always_deny))
         agent = Agent(backend, registry, AgentConfig(max_steps=5))
 
-        task = Task(task_id="conf1", description="test", repo_path=str(tmp_path), max_steps=5)
+        task = Task(task_type="read_only", task_id="conf1", description="test", repo_path=str(tmp_path), max_steps=5)
         with EventLog.create(task, log_dir=str(tmp_path / "logs")) as log:
             result = agent.run(task, log)
 
@@ -271,7 +271,7 @@ class TestConfirmInAgentFlow:
         registry = ToolRegistry().register(ShellTool(confirm_callback=always_allow))
         agent = Agent(backend, registry, AgentConfig(max_steps=5))
 
-        task = Task(task_id="conf2", description="test", repo_path=str(tmp_path), max_steps=5)
+        task = Task(task_type="read_only", task_id="conf2", description="test", repo_path=str(tmp_path), max_steps=5)
         with EventLog.create(task, log_dir=str(tmp_path / "logs")) as log:
             result = agent.run(task, log)
 
@@ -295,7 +295,7 @@ class TestConfirmInAgentFlow:
         registry = ToolRegistry().register(ShellTool(confirm_callback=always_deny))
         agent = Agent(backend, registry, AgentConfig(max_steps=5))
 
-        task = Task(task_id="conf3", description="test", repo_path=str(tmp_path), max_steps=5)
+        task = Task(task_type="read_only", task_id="conf3", description="test", repo_path=str(tmp_path), max_steps=5)
         with EventLog.create(task, log_dir=str(tmp_path / "logs")) as log:
             result = agent.run(task, log)
 

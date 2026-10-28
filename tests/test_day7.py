@@ -26,7 +26,7 @@ from tools.base import NoopTool, ToolRegistry
 
 @pytest.fixture
 def task(tmp_path) -> Task:
-    return Task(
+    return Task(task_type="read_only",
         task_id="day7test",
         description="Fix the bug",
         repo_path=str(tmp_path),
@@ -201,7 +201,7 @@ class TestGetGitDiff:
         # 先修改文件（模拟 agent 的 file_write 操作）
         (git_repo / "main.py").write_text("x = 99\n")
 
-        task = Task(
+        task = Task(task_type="read_only",
             task_id="patchtest",
             description="fix",
             repo_path=str(git_repo),
@@ -230,7 +230,7 @@ class TestRepoMapCache:
         """同一次 run 内，repo_map 只构建一次。"""
         (tmp_path / "mod.py").write_text("def foo(): pass\n")
 
-        task = Task(
+        task = Task(task_type="read_only",
             task_id="cache1",
             description="fix",
             repo_path=str(tmp_path),
@@ -273,8 +273,8 @@ class TestRepoMapCache:
         ])
         agent = Agent(backend, registry)
 
-        task_a = Task(task_id="ca", description="a", repo_path=str(repo_a), max_steps=5)
-        task_b = Task(task_id="cb", description="b", repo_path=str(repo_b), max_steps=5)
+        task_a = Task(task_type="read_only", task_id="ca", description="a", repo_path=str(repo_a), max_steps=5)
+        task_b = Task(task_type="read_only", task_id="cb", description="b", repo_path=str(repo_b), max_steps=5)
 
         with EventLog.create(task_a, log_dir=str(tmp_path / "logs")) as log_a:
             agent.run(task_a, log_a)
@@ -299,7 +299,7 @@ class TestIntegration:
         (tmp_path / "main.py").write_text("def broken(): pass\n")
         (tmp_path / "utils.py").write_text("def helper(): return 1\n")
 
-        task = Task(
+        task = Task(task_type="read_only",
             task_id="integration1",
             description="Fix the broken function",
             repo_path=str(tmp_path),
@@ -355,7 +355,7 @@ class TestIntegration:
                     raise ConnectionError("first attempt fails")
                 return super().complete(messages, tools)
 
-        task = Task(
+        task = Task(task_type="read_only",
             task_id="retry_transparent",
             description="fix",
             repo_path=str(tmp_path),
@@ -378,7 +378,7 @@ class TestIntegration:
         from agent.event_log import summarize_run
         from tools.base import FailingTool
 
-        task = Task(
+        task = Task(task_type="read_only",
             task_id="statstest",
             description="fix",
             repo_path=str(tmp_path),
