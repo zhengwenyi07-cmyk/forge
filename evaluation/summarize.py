@@ -30,7 +30,8 @@ def summarize(output: Path):
     summary = {"tasks": len(ids), "models": {}, "scope": "SWE-bench Lite paired experiment; no general model ranking implied"}
     resolved_by_model = []
     for model in models:
-        report = validate_reports(output / model / "verification", "paired", set(ids))
+        predictions = json.loads((output / f"{model}-predictions.json").read_text(encoding="utf-8"))
+        report = validate_reports(output / model / "verification", "paired", set(ids), expected_predictions=predictions)
         resolved = set(report["resolved_ids"])
         resolved_by_model.append([i in resolved for i in ids])
         records = [json.loads((output / model / i / "result.json").read_text()) for i in ids]

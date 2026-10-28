@@ -63,6 +63,7 @@ def run_trial(row, model, cfg, settings, image, repos_dir, output, fingerprint):
                 subprocess.run(["docker", "rm", container], check=True, capture_output=True)
         subprocess.run(["git", "config", "core.autocrlf", "false"], cwd=repo, check=True)
         subprocess.run(["git", "checkout", "--detach", row["base_commit"]], cwd=repo, check=True, capture_output=True)
+        base_commit = row["base_commit"]
         if capture_patch(str(repo)):
             raise RuntimeError("Trial must start with a clean checkout at base_commit")
         runtime = DockerRuntime(str(repo), image=image, setup_cmds=["git config --global safe.directory /testbed"])
@@ -80,7 +81,7 @@ def run_trial(row, model, cfg, settings, image, repos_dir, output, fingerprint):
             agent = Agent(backend, registry, AgentConfig(budget_tokens=settings["budget_tokens"], history_max_messages=40, stream=False), runtime=runtime)
             with EventLog.create(task, log_dir=str(trial / "logs")) as log:
                 result = agent.run(task, log)
-            record.update(status="infrastructure_error" if result.error else result.status.value, tokens=result.total_tokens, validation=result.validation, summary=result.summary.replace(cfg.llm.api_key, "[REDACTED]"), patch=capture_patch(str(repo)))
+            record.update(status="infrastructure_error" if result.error else result.status.value, tokens=result.total_tokens, validation=result.validation, summary=result.summary.replace(cfg.llm.api_key, "[REDACTED]"), patch=capture_patch(str(repo), base_ref=base_commit))
         except Exception as exc:
             # Errors may contain server-provided request details: redact the configured secret.
             record["error"] = str(exc).replace(cfg.llm.api_key, "[REDACTED]")
@@ -143,7 +144,8 @@ def main():
         smoke = rows[:5]
         write_json(output / "gold-dataset.json", smoke)
         write_json(output / "gold-predictions.json", [{"instance_id": r["instance_id"], "model_patch": r["patch"], "model_name_or_path": "gold"} for r in smoke])
-        subprocess.run([sys.executable, str(root / "run_verification.py"), "--predictions", str(output / "gold-predictions.json"), "--dataset", str(output / "gold-dataset.json"), "--output", str(output / "gold"), "--run-id", "gold-smoke", "--image", args.harness_image], check=True)
+        write_json(output / "gold-images.json", {r["instance_id"]: images[r["instance_id"]] for r in smoke})
+        subprocess.run([sys.executable, str(root / "run_verification.py"), "--predictions", str(output / "gold-predictions.json"), "--dataset", str(output / "gold-dataset.json"), "--output", str(output / "gold"), "--run-id", "gold-smoke", "--image", args.harness_image, "--image-lock", str(output / "gold-images.json")], check=True)
         from run_verification import validate_reports
         report = validate_reports(output / "gold", "gold-smoke", {r["instance_id"] for r in smoke})
         if set(report["resolved_ids"]) != {r["instance_id"] for r in smoke}:
@@ -178,7 +180,7 @@ def main():
             records.append(record)
             predictions.append({"instance_id": row["instance_id"], "model_patch": (trial / "prediction.patch").read_text(encoding="utf-8"), "model_name_or_path": model})
         write_json(output / f"{model}-predictions.json", predictions)
-        subprocess.run([sys.executable, str(root / "run_verification.py"), "--predictions", str(output / f"{model}-predictions.json"), "--dataset", str(output / "dataset.json"), "--output", str(output / model / "verification"), "--run-id", "paired", "--image", args.harness_image], check=True)
+        subprocess.run([sys.executable, str(root / "run_verification.py"), "--predictions", str(output / f"{model}-predictions.json"), "--dataset", str(output / "dataset.json"), "--output", str(output / model / "verification"), "--run-id", "paired", "--image", args.harness_image, "--image-lock", str(output / "images.json")], check=True)
     from evaluation.summarize import summarize
     write_json(output / "summary.json", summarize(output))
 
