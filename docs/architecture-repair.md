@@ -62,3 +62,40 @@ docker build -f docker/Dockerfile.harness -t forge-swebench:4.1.0 .
 - 官方 Astropy gold 验证：`astropy__astropy-14995` resolved，1/1，基础设施错误为 0，实际执行约 90 秒。
 
 完整 30 题对照评测状态与最新回归结果记录在同目录的 `repair-results.md`，原始运行文件位于被忽略的 `evaluation/runs/` 和 `logs/`。
+
+## 后续审查修复
+
+2026-10-28 的第二轮审查发现并修复了 8 个边界问题：
+
+1. 官方验证将预测补丁、数据集、超时、harness 镜像 ID 和实例镜像 ID 绑定到运行编号。不同内容复用旧编号会被拒绝；未绑定的旧报告必须用新编号重新验证。输入存放在 `inputs/<run_id>/`，不会覆盖其他运行。汇总时也核对当前预测与已评测输入。
+2. Agent 启动时固定 Git 基准提交，后续 `git_commit` 不会清空任务补丁或使已有测试证据失效。A/B 收集补丁也相对实例的 base commit。
+3. Docker 在断网前准备项目环境并执行检查。默认识别 `requirements.txt`、`pyproject.toml`、`setup.py` 和 npm 元数据；安装或检查失败时立即停止，不消耗模型步数尝试修复环境。
+4. 流式请求启用 `include_usage`，读取没有 choices 的 usage-only 尾块，优先使用服务端用量。服务端缺失 usage 时，估算包括工具 schema、工具参数及 reasoning，并通过 `usage_source=estimated` 和日志明确标记。`--no-stream` 可切换非流式模式。
+5. 子结果在父模型调用期间到达时，完成请求会被阻止，先注入通知并让父模型再次决策。
+6. `task_wait` 不参与普通重复动作检测，仍受总步数、Token 预算和单次等待超时约束。
+7. Linux `chat --no-sandbox --repo PATH` 的所有工具共享该 repo 的 Runtime，避免使用启动目录。
+8. 上下文裁剪优先保留最新结果的首尾；超大初始任务也会缩短，为最新结果留出空间。
+
+额外修复：测试命令若在执行中修改代码，之前的测试证据不会自动应用于执行后的版本；需要重新检查并验证。
+
+### 项目环境配置
+
+默认配置会安装 Python 项目及 requirements 后执行 `pip check`。有特定依赖或系统库时，在本地配置中写明镜像、安装和导入检查。例如：
+
+```yaml
+runtime:
+  image: forge-runtime:py311
+  setup_commands:
+    - python -m pip install -e '.[dev]'
+  check_commands:
+    - python -m pip check
+    - python -c "import yaml"
+  setup_network: true
+  setup_timeout: 600
+```
+
+`setup_commands: []` 表示使用镜像中已经安装好的项目依赖，仍会执行 `check_commands`。`null` 或不提供此字段表示自动识别。Node 项目需要使用含 Node/npm 和 Forge 工具所需 Python/Git/bash 的自定义镜像；缺失依赖应在 preflight 阶段通过具体检查发现。项目安装命令属于用户指定仓库的环境准备步骤，应当放在可重现的配置中。
+
+### 旧评测结果迁移
+
+已有 `gold-smoke`/`paired` 报告没有绑定文件时，不允许直接续用。使用新的 `--output` 目录运行 A/B；单独验证可以选择新的 `--run-id`。新的输入绑定允许完全相同的实验恢复运行，但改变补丁、镜像或数据集后需要新编号。官方镜像仍可能需要下载，缓存校验修复不会消除网络限制。

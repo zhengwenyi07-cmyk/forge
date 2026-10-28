@@ -57,3 +57,17 @@ fork 是并发工作区隔离，不是对恶意代码的安全边界。父消息
 - 交付分支为 `dev`；本地 `main` 仍保持 `977d4cd`，远端 `main` 仍保持 `45d9dfb`。本轮不合并或推送 `main`。
 
 累计 Token 预算在每轮请求前检查，达到 80,000 后停止后续调用；正在执行的单次请求可能使累计消耗超过阈值。两个模型采用完全相同的停止规则。
+
+## 第二轮修复验证（2026-10-28）
+
+复查确认的 8 项缺陷均已修复，并补充针对性回归。实现细节、项目环境配置示例及旧报告迁移规则见 `architecture-repair.md` 的“后续审查修复”。
+
+- Windows 全量：468 passed，4 skipped，143.13 秒（`logs/review-fixes-final.txt`）。
+- Linux 全量：461 passed，11 skipped，32.81 秒（`logs/review-fixes-linux.txt`）。11 项为测试容器内没有 Docker CLI 的嵌套 Docker 检查；真实 Docker 路径已在宿主机测试中执行。
+- 环境准备实际测试：从 requirements 安装本地依赖 wheel，导入检查通过后断网，任务阶段依赖仍可正常使用；导入检查失败时 Runtime 关闭并阻止任务开始。
+- 官方 Astropy gold：新入口、新绑定、新运行编号 `gold-review`，1/1 resolved；输入完全相同时续跑成功。
+- 分数完整性复测：将同一任务预测替换成无效补丁并复用 `gold-review`，验证入口退出码 1，拒绝复用旧报告，已绑定输入保持不变（`logs/review-score-integrity.txt`）。
+- 新的 Flash 流式小请求：服务端用量 input=98、output=84；Pro：input=98、output=195。两者 `usage_source=provider`，usage-only 尾块已被计入（`logs/review-live-stream.txt`）。这些小请求只验证用量统计，不比较模型能力。
+- wheel 构建通过；不包含本地密钥文件。
+
+30 题 A/B 尚未完成。本轮修复了缓存与执行机制，没有把上述单题/小请求作为 30 题评测结果。再次运行完整实验时应选择新的输出目录，以避免混用旧代码生成的缓存与未绑定报告。
