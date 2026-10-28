@@ -134,6 +134,7 @@ class SubAgent:
         self.task_id = task_id
         self.agent_type = agent_type
         self._timeout = timeout
+        self._task = replace(task, task_type="read_only") if agent_type in ("explore", "review") else task
         self._parent_registry = parent_registry
         self._allowed_tools = allowed_tools
         self._parent_runtime = runtime
@@ -175,10 +176,6 @@ class SubAgent:
         self._stop_event = threading.Event()
 
         # 备用引用
-        self._task = task
-        if agent_type in ("explore", "review"):
-            self._task = replace(task, task_type="read_only")
-        self._history.add(LLMMessage(role="user", content="[SUB-AGENT ASSIGNMENT]\n" + self._task.description))
         self._config.system_prompt_override = system_prompt_to_use
         self._config.message_source = self._mailbox.poll_inbox
         self._log_dir = log_dir
@@ -200,11 +197,13 @@ class SubAgent:
         """
         child_history = ConversationHistory(max_messages=40)
         # 首条：system prompt
-        child_history.add(LLMMessage(role="system", content=system_prompt))
+        child_history.add(LLMMessage(role="user", content="[SUB-AGENT ASSIGNMENT]\n" + self._task.description))
         # 复制父 Agent 最近历史作为缓存前缀（最多 10 条）
         parent_msgs = parent_history.to_list() if parent_history else []
         recent = parent_msgs[-min(10, len(parent_msgs)):] if parent_msgs else []
         for msg in recent:
+            if getattr(msg, "role", None) == "system":
+                continue
             child_history.add(LLMMessage(
                 role=msg.role if hasattr(msg, 'role') else "user",
                 content=msg.content if hasattr(msg, 'content') else str(msg),

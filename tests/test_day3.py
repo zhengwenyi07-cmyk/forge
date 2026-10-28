@@ -8,6 +8,7 @@ fixtures/ 下放测试用 repo 片段，测试用 tmp_path 隔离，互不干扰
 """
 
 import subprocess
+import os
 from pathlib import Path
 
 import pytest
@@ -197,7 +198,7 @@ class TestShellTool:
         assert not result.success
         assert "Exit code" in result.error
 
-    @pytest.mark.skip(reason="Windows: 'sleep' is Unix-only command")
+    @pytest.mark.skipif(os.name == "nt", reason="Windows: 'sleep' is Unix-only command")
     def test_timeout(self):
         result = self.tool.execute({"cmd": "sleep 10", "timeout": 1})
         assert not result.success
@@ -211,7 +212,7 @@ class TestShellTool:
         result = self.tool.execute({"cmd": ""})
         assert not result.success
 
-    @pytest.mark.skip(reason="Windows: 'pwd' is Unix-only, and cwd path encoding mismatch")
+    @pytest.mark.skipif(os.name == "nt", reason="Windows: 'pwd' is Unix-only, and cwd path encoding mismatch")
     def test_cwd_respected(self, tmp_path):
         result = self.tool.execute({"cmd": "pwd", "cwd": str(tmp_path)})
         assert result.success

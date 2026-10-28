@@ -53,7 +53,7 @@ class OpenAICompatBackend(LLMBackend):
     ) -> None:
         try:
             from openai import OpenAI
-            kwargs = {"api_key": api_key, "base_url": base_url}
+            kwargs = {"api_key": api_key, "base_url": base_url, "timeout": 120, "max_retries": 0}
             if headers:
                 kwargs["default_headers"] = headers
             self._client = OpenAI(**kwargs)

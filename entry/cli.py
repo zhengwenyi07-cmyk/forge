@@ -447,6 +447,7 @@ def run(
 @click.option("--model", "-m", default=None, help="Override LLM model name")
 @click.option("--provider", "-p", default=None, help="Override LLM provider")
 @click.option("--max-steps", default=None, type=int, help="Max steps per round")
+@click.option("--task-type", type=click.Choice(["modify", "read_only"]), default="modify")
 @click.option("--sandbox/--no-sandbox", default=True, help="Use Linux Docker by default; --no-sandbox requires Linux/WSL")
 @click.option("--verbose", "-v", is_flag=True, help="Show debug logs")
 @click.pass_context
@@ -457,6 +458,7 @@ def chat(
     provider: str | None,
     max_steps: int | None,
     sandbox: bool,
+    task_type: str,
     verbose: bool,
 ) -> None:
     """
@@ -528,6 +530,7 @@ def chat(
         confirm_callback=terminal_confirm,   # chat 模式默认开启确认
         task_registry=task_registry,          # multi-agent 支持
         runtime=runtime,
+        task_type=task_type,
     )
 
     # 欢迎信息

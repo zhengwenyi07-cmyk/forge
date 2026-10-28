@@ -36,6 +36,14 @@ full = [
 [project.scripts]
 agent = "entry.cli:main"
 
+[tool.setuptools]
+include-package-data = false
+py-modules = ["run_verification"]
+
+[tool.setuptools.package-data]
+config = ["default.yaml", "swebench-mimo.yaml"]
+evaluation = ["swebench30.json"]
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["agent*", "llm*", "tools*", "context*", "entry*", "config*", "multi_agent*", "evaluation*"]

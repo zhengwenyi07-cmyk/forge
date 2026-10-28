@@ -40,6 +40,9 @@ class IsolatedWorktree:
         return [(str(common), "/forge-git")], {"GIT_DIR": f"/forge-git/{relative}", "GIT_WORK_TREE": workdir}
 
     def cleanup(self):
+        expected = (Path(self._temp.name) / "repo").absolute()
+        if self.root.absolute() != expected or not expected.is_relative_to(Path(self._temp.name).absolute()):
+            raise RuntimeError("Refusing cleanup outside the allocated child workspace")
         if self.root.exists():
             result = subprocess.run(["git", "worktree", "remove", "--force", str(self.root)], cwd=self.parent, capture_output=True)
             if result.returncode:

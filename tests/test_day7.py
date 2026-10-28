@@ -294,12 +294,14 @@ class TestRepoMapCache:
 
 class TestIntegration:
 
-    def test_full_run_with_all_features(self, tmp_path):
+    def test_full_run_with_all_features(self, tmp_path, real_repo):
         """端到端跑通：repo_map + token_budget + reflection + retry 全部生效。"""
+        tmp_path = real_repo
         (tmp_path / "main.py").write_text("def broken(): pass\n")
         (tmp_path / "utils.py").write_text("def helper(): return 1\n")
+        (tmp_path / "test_broken.py").write_text("from main import broken\ndef test_broken():\n    assert broken() == 42\n")
 
-        task = Task(task_type="read_only",
+        task = Task(task_type="modify",
             task_id="integration1",
             description="Fix the broken function",
             repo_path=str(tmp_path),
@@ -308,11 +310,13 @@ class TestIntegration:
         )
 
         from tools.file_tool import FileReadTool, FileWriteTool
+        from tools.test_tool import PytestTool
         registry = (
             ToolRegistry()
             .register(NoopTool("shell"))
             .register(FileReadTool())
             .register(FileWriteTool())
+            .register(PytestTool())
         )
 
         script = [
@@ -321,6 +325,7 @@ class TestIntegration:
                 "path": str(tmp_path / "main.py"),
                 "content": "def broken():\n    return 42\n",
             })),
+            Action(ActionType.TOOL_CALL, "validate", ToolCall("test", {"path": str(tmp_path / "test_broken.py"), "cwd": str(tmp_path)})),
             Action(ActionType.FINISH, "Fixed broken()", message="Added return value"),
         ]
         backend = MockBackend(script)
@@ -336,7 +341,8 @@ class TestIntegration:
             result = agent.run(task, log)
 
         assert result.is_success()
-        assert result.steps_taken == 3
+        assert result.steps_taken == 4
+        assert result.validation[-1]["success"]
         assert "return value" in result.summary.lower() or "Fixed" in result.summary
 
         # 验证文件确实被写入

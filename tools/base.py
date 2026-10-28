@@ -35,6 +35,7 @@ class ToolResult:
     success: bool
     output: str                         # 工具的文本输出，已做截断处理
     error: str | None = None            # 失败时的错误信息
+    test_attempted: bool = False
 
     def to_observation(self, tool_name: str) -> Observation:
         """转换为 Observation，供 core.py 写入 EventLog 和注入上下文。"""

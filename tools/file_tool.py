@@ -1,10 +1,12 @@
 """
 tools/file_tool.py
 
-文件操作工具，提供三个 action：
+文件操作工具：
 - file_read:   读取文件全部内容
 - file_view:   分窗口查看文件（防止一次读爆上下文）
 - file_write:  写入文件（全量覆盖）
+- file_edit: 精确唯一替换
+- apply_patch: 检查后应用 unified diff
 
 设计原则：
 - 支持双模式：本地直接 I/O（默认） / 容器 runtime.exec()（沙箱模式）
@@ -259,6 +261,8 @@ def _format_view(
     """格式化分页查看输出。"""
     if total_lines is None:
         total_lines = start_line + len(window_lines) - 1
+    if total_lines == 0:
+        return ToolResult(success=True, output=f"File: {path} (0 lines). End of file.")
 
     assert len(window_lines) <= window_size, "file_view received more than one window"
     numbered = "\n".join(

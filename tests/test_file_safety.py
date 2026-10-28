@@ -30,6 +30,13 @@ def test_long_line_is_bounded(tmp_path):
     assert len(FileViewTool().execute({"path": str(p)}).output) <= MAX_VIEW_CHARS
 
 
+def test_empty_file_has_explicit_boundary(tmp_path):
+    p = tmp_path / "empty"
+    p.write_bytes(b"")
+    assert "0 lines" in FileViewTool().execute({"path": str(p)}).output
+    assert not FileViewTool().execute({"path": str(p), "start_line": 2}).success
+
+
 def test_precise_edit_preserves_crlf_and_other_content(tmp_path):
     p = tmp_path / "f"
     p.write_bytes(b"alpha\r\nbeta\r\ngamma\r\n")

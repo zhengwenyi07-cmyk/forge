@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -64,7 +65,7 @@ class TestLocalRuntime:
         assert result.success
         assert "hello" in result.output
 
-    @pytest.mark.skip(reason="Windows: 'ls' is Unix-only command")
+    @pytest.mark.skipif(os.name == "nt", reason="Windows: 'ls' is Unix-only command")
     def test_exec_with_cwd(self, tmp_path):
         (tmp_path / "test.txt").write_text("content")
         rt = LocalRuntime()
@@ -78,7 +79,7 @@ class TestLocalRuntime:
         assert not result.success
         assert result.returncode != 0
 
-    @pytest.mark.skip(reason="Windows: 'sleep' is Unix-only command")
+    @pytest.mark.skipif(os.name == "nt", reason="Windows: 'sleep' is Unix-only command")
     def test_exec_timeout(self):
         rt = LocalRuntime()
         result = rt.exec("sleep 10", timeout=1)
@@ -321,6 +322,15 @@ class TestDockerRuntimeUnit:
         rm_call = next((a for a in rm_calls if "rm" in a), None)
         assert rm_call is not None
         assert "abc123" in rm_call
+
+    def test_relative_cwd_is_resolved_inside_container_workspace(self, tmp_path):
+        rt = DockerRuntime(str(tmp_path))
+        rt._container_id = "fake"
+        with patch("subprocess.run", return_value=MagicMock(returncode=0, stdout="", stderr="")) as run:
+            rt.exec("pwd", cwd="src")
+            args = run.call_args.args[0]
+            assert args[args.index("--workdir") + 1] == "/workspace/src"
+        assert not rt.exec("pwd", cwd="../outside").success
 
 
 # ===========================================================================

@@ -160,42 +160,7 @@ class SearchTextTool(BaseTool):
         return _format_search_results(matches, raw_pattern=pattern)
 
     def _execute_via_runtime(self, pattern, search_path, file_pattern, case_sensitive):
-        """容器模式：base64 编码 Python 搜索脚本，在容器内执行。"""
-        params_b64 = base64.b64encode(json.dumps({
-            "pattern": pattern, "path": search_path,
-            "file_pattern": file_pattern, "case_sensitive": case_sensitive,
-            "max_results": MAX_RESULTS, "max_line_length": MAX_LINE_LENGTH,
-            "skip_dirs": list(_SKIP_DIRS),
-        }).encode()).decode()
-
-        script = (
-            "import base64,json,os,re,sys;"
-            f"p=json.loads(base64.b64decode('{params_b64}'));"
-            "pt=re.compile(p['pattern'],0 if p['case_sensitive'] else re.I);"
-            "sd=set(p['skip_dirs']);mx=p['max_results'];ml=p['max_line_length'];cnt=0;"
-            "for r,ds,fs in os.walk(p['path']):"
-            " ds[:]=[d for d in ds if d not in sd];"
-            " for fn in fs:"
-            "  if p['file_pattern']!='*' and not fn.endswith(p['file_pattern'].replace('*','')):continue"
-            "  fp=os.path.join(r,fn);"
-            "  try:"
-            "   for i,l in enumerate(open(fp,errors='replace'),1):"
-            "    if pt.search(l):"
-            "     ln=l.rstrip()[:ml];print(f'{fp}:{i}:{ln}');cnt+=1"
-            "     if cnt>=mx:sys.exit(0)"
-            "  except:pass"
-        )
-
-        result = self._runtime.exec(
-            f'python -c "import base64;exec(base64.b64decode(\'{_b64_script(script)}\').decode())"',
-            timeout=30,
-        )
-
-        if not result.success:
-            return ToolResult(success=False, output="", error=result.stderr.strip())
-
-        lines = [l for l in result.stdout.splitlines() if l.strip()]
-        return _format_search_results(lines, raw_pattern=pattern)
+        return _runtime_search(self._runtime, "search_text", {"pattern": pattern, "path": search_path, "file_pattern": file_pattern, "case_sensitive": case_sensitive})
 
 
 # ===========================================================================
@@ -278,29 +243,7 @@ class FindFilesTool(BaseTool):
         return ToolResult(success=True, output="\n".join(results) + suffix)
 
     def _execute_via_runtime(self, pattern, search_path):
-        """容器模式：用 find 命令在容器内查找文件。"""
-        # find 命令需排除黑名单目录
-        exclude_dirs = " ".join(f"-not -path '*/{d}/*'" for d in _SKIP_DIRS if "*" not in d)
-        cmd = (
-            f"find '{search_path}' -name '{pattern}' -type f "
-            f"{exclude_dirs} 2>/dev/null | head -{MAX_RESULTS}"
-        )
-        result = self._runtime.exec(cmd, timeout=15)
-
-        if not result.success:
-            return ToolResult(success=False, output="", error=result.stderr.strip())
-
-        lines = [l for l in result.stdout.splitlines() if l.strip()]
-        if not lines:
-            return ToolResult(
-                success=True, output=f"No files found matching '{pattern}' in {search_path}",
-            )
-
-        suffix = ""
-        if len(lines) == MAX_RESULTS:
-            suffix = f"\n[Showing first {MAX_RESULTS} results]"
-
-        return ToolResult(success=True, output="\n".join(lines) + suffix)
+        return _runtime_search(self._runtime, "find_files", {"pattern": pattern, "path": search_path})
 
 
 # ===========================================================================
@@ -398,47 +341,7 @@ class FindSymbolTool(BaseTool):
         return ToolResult(success=True, output="\n".join(matches))
 
     def _execute_via_runtime(self, symbol, search_path):
-        """容器模式：base64 编码 Python 脚本，在容器内搜索符号。"""
-        params_b64 = base64.b64encode(json.dumps({
-            "symbol": symbol, "path": search_path,
-            "max_results": MAX_RESULTS,
-            "skip_dirs": list(_SKIP_DIRS),
-        }).encode()).decode()
-
-        script = (
-            "import base64,json,os,re,sys;"
-            f"p=json.loads(base64.b64decode('{params_b64}'));"
-            "pt=re.compile(r'^(\s*)(def|class)\s+('+re.escape(p['symbol'])+r'\w*)\s*[:(]',re.MULTILINE);"
-            "sd=set(p['skip_dirs']);mx=p['max_results'];cnt=0;"
-            "for r,ds,fs in os.walk(p['path']):"
-            " ds[:]=[d for d in ds if d not in sd];"
-            " for fn in fs:"
-            "  if not fn.endswith('.py'):continue"
-            "  fp=os.path.join(r,fn);"
-            "  try:"
-            "   txt=open(fp,errors='replace').read();"
-            "   for m in pt.finditer(txt):"
-            "    ln=txt[:m.start()].count('\\n')+1;"
-            "    k=m.group(2);n=m.group(3);ind=len(m.group(1));"
-            "    sc='method' if ind>0 else 'top-level';"
-            "    print(f'{fp}:{ln}: {k} {n} ({sc})');cnt+=1"
-            "    if cnt>=mx:sys.exit(0)"
-            "  except:pass"
-        )
-
-        result = self._runtime.exec(
-            f'python -c "import base64;exec(base64.b64decode(\'{_b64_script(script)}\').decode())"',
-            timeout=30,
-        )
-
-        if not result.success:
-            return ToolResult(success=False, output="", error=result.stderr.strip())
-
-        lines = [l for l in result.stdout.splitlines() if l.strip()]
-        if not lines:
-            return ToolResult(success=True, output=f"No definition found for '{symbol}'")
-
-        return ToolResult(success=True, output="\n".join(lines))
+        return _runtime_search(self._runtime, "find_symbol", {"symbol": symbol, "path": search_path})
 
 
 # ===========================================================================
@@ -460,3 +363,12 @@ def _format_search_results(matches: list[str], raw_pattern: str = "") -> ToolRes
 def _b64_script(python_code: str) -> str:
     """将 Python 脚本编码为 base64（供容器内 exec 调用）。"""
     return base64.b64encode(python_code.encode()).decode()
+
+
+def _runtime_search(runtime, operation, params):
+    from tools import search_ops
+    from tools.file_tool import _python_command
+    source = Path(search_ops.__file__).read_text(encoding="utf-8")
+    script = source + "\nimport json\nprint(search(" + repr(operation) + ", json.loads(" + repr(json.dumps(params)) + ")))\n"
+    result = runtime.exec(_python_command(script), timeout=30)
+    return ToolResult(success=result.success, output=result.stdout, error=result.stderr if not result.success else None)

@@ -14,6 +14,7 @@ from __future__ import annotations
 import re
 import shlex
 import sys
+import os
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -107,13 +108,14 @@ class PytestTool(BaseTool):
 
         if isinstance(self._runtime, LocalRuntime):
             cmd_parts[0] = sys.executable
-        cmd_str = command or (subprocess.list2cmdline(cmd_parts) if __import__('os').name == 'nt' and isinstance(self._runtime, LocalRuntime) else shlex.join(cmd_parts))
+        cmd_str = command or (subprocess.list2cmdline(cmd_parts) if os.name == 'nt' and isinstance(self._runtime, LocalRuntime) else shlex.join(cmd_parts))
         run_result = self._runtime.exec(cmd_str, cwd=cwd, timeout=PYTEST_TIMEOUT)
         if "timed out" in run_result.stderr.lower():
             return ToolResult(
                 success=False,
                 output="",
                 error=f"pytest timed out after {PYTEST_TIMEOUT}s",
+                test_attempted=True,
             )
         raw = run_result.output
         success = run_result.returncode == 0
@@ -125,6 +127,7 @@ class PytestTool(BaseTool):
             success=success,
             output=output,
             error=None if success else f"pytest exited with code {run_result.returncode}",
+            test_attempted=True,
         )
 
 

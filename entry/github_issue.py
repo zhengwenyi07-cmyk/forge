@@ -319,13 +319,20 @@ def run_on_issue(
         return 1
 
     from entry.cli import _build_registry
-    registry = _build_registry(config)
+    from tools.runtime import create_runtime
+    runtime = create_runtime(sandbox=True, repo_path=local_path)
+    preflight = runtime.preflight()
+    if not preflight.success:
+        runtime.cleanup()
+        click.echo(f"Linux Runtime error: {preflight.stderr}", err=True)
+        return 1
+    registry = _build_registry(config, runtime=runtime)
 
     agent_config = AgentConfig(
         max_steps=config.agent.max_steps,
         budget_tokens=config.agent.budget_tokens,
     )
-    agent = Agent(backend, registry, agent_config)
+    agent = Agent(backend, registry, agent_config, runtime=runtime)
 
     task = Task(
         description=description,
@@ -340,8 +347,11 @@ def run_on_issue(
     # 如果 Agent 未成功完成（FAILED / GAVE_UP / MAX_STEPS），不继续 push/PR。
     click.echo(f"\nRunning agent on issue #{issue_number} ...")
     t0 = time.time()
-    with EventLog.create(task, log_dir=config.agent.log_dir) as log:
-        result = agent.run(task, log)
+    try:
+        with EventLog.create(task, log_dir=config.agent.log_dir) as log:
+            result = agent.run(task, log)
+    finally:
+        runtime.cleanup()
 
     elapsed = time.time() - t0
     click.echo(f"  Status : {result.status.value}")

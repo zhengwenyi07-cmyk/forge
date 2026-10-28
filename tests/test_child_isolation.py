@@ -40,6 +40,10 @@ def test_child_receives_assignment_and_parent_message(real_repo):
     assert any("Also inspect its tests" in text for text in seen)
     assert any("EXPLORE INSTRUCTIONS" in text for text in seen)
     assert not child.mailbox.has_pending_inbox
+    for i in range(50):
+        from llm.base import LLMMessage
+        child._history.add(LLMMessage("user", f"later {i}"))
+    assert "Find precise VALUE definition" in child._history.to_list()[0].content
 
 
 def test_two_forks_return_independent_patches(real_repo):

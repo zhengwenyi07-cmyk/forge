@@ -181,6 +181,15 @@ class Agent:
         # 记录 repo_path，供 _build_messages（system prompt 中的 repo 路径）
         # 和 _get_git_diff（git diff HEAD）使用
         self._current_repo_path = task.repo_path
+        self._current_task_type = task.task_type
+        from pathlib import Path
+        self._patch_excludes = []
+        try:
+            log_path = Path(log.path).resolve()
+            log_relative = log_path.relative_to(Path(task.repo_path).resolve())
+            self._patch_excludes = [log_relative.parent.as_posix() if log_relative.parent != Path(".") else log_relative.as_posix()]
+        except ValueError:
+            pass
         initial_patch = self._get_git_diff(task.repo_path) if task.task_type == "modify" else None
         tested_patch = None
         test_attempts = []
@@ -227,6 +236,10 @@ class Agent:
         # ═══════════════════════════════════════════════════════════════════
         for step in range(1, task.max_steps + 1):
             logger.debug("Step %d/%d", step, task.max_steps)
+            if total_tokens >= task.budget_tokens:
+                reason = f"Run token budget exhausted ({task.budget_tokens})"
+                log.log_task_failed(steps=step - 1, reason=reason)
+                return RunResult(task.task_id, RunStatus.GAVE_UP, reason, step - 1, total_tokens)
 
             # ── 阶段 -1：检查外部中断信号 ──────────────────────────
             # SubAgent 通过 stop_check 回调传入停止信号。
@@ -333,8 +346,9 @@ class Agent:
                     if patch and tested_patch != patch and task.test_cmd:
                         result = self._registry.execute_tool("test", {"command": task.test_cmd, "cwd": task.repo_path})
                         log.log_observation(step=step, observation=result.to_observation("test"))
-                        tested_patch = self._get_git_diff(task.repo_path)
-                        test_attempts.append({"command": task.test_cmd, "success": result.success, "output": result.output, "error": result.error})
+                        if result.test_attempted:
+                            tested_patch = self._get_git_diff(task.repo_path)
+                            test_attempts.append({"command": task.test_cmd, "success": result.success, "output": result.output, "error": result.error})
                     if not test_attempts or tested_patch != patch:
                         blockers.append("Attempt a targeted test using the test tool after the last change. Supply path or command, then call finish again.")
                 if blockers:
@@ -381,7 +395,7 @@ class Agent:
                 # ToolResult → Observation：包装为 Agent 标准格式
                 result = self._registry.execute_tool(tc.name, tc.params)
                 observation = result.to_observation(tc.name)
-                if tc.name == "test" and (tc.params.get("path") or tc.params.get("command")):
+                if tc.name == "test" and result.test_attempted and (tc.params.get("path") or tc.params.get("command")):
                     tested_patch = self._get_git_diff(task.repo_path)
                     test_attempts.append({"params": tc.params, "success": result.success, "output": result.output, "error": result.error})
 
@@ -558,6 +572,8 @@ class Agent:
         )
         if self._cfg.system_prompt_override:
             system_content = self._cfg.system_prompt_override + "\n\n" + system_content
+        if getattr(self, "_current_task_type", "modify") == "read_only":
+            system_content += "\nThis is a read-only analysis task. Report findings with finish; a diff and test attempt are not required."
         # 缓存 system prompt（供 _update_task_tool_context 复用，避免重复生成）
         self._cached_system_prompt = system_content
         self._cached_repo_summary = self._repo_map_cache
@@ -685,9 +701,9 @@ class Agent:
         from tools.file_tool import _python_command
         try:
             if self._runtime is None:
-                diff = workspace.capture_patch(repo_path)
+                diff = workspace.capture_patch(repo_path, getattr(self, "_patch_excludes", []))
             else:
-                script = Path(workspace.__file__).read_text(encoding="utf-8") + "\nprint(capture_patch(), end='')\n"
+                script = Path(workspace.__file__).read_text(encoding="utf-8") + f"\nprint(capture_patch(exclude_paths={getattr(self, '_patch_excludes', [])!r}), end='')\n"
                 result = self._runtime.exec(_python_command(script), cwd=repo_path, timeout=30)
                 if not result.success:
                     return None

@@ -35,6 +35,8 @@ import logging
 import uuid
 import shlex
 import os
+import sys
+import posixpath
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
@@ -133,6 +135,9 @@ class LocalRuntime(Runtime):
         cwd: str | None = None,
         timeout: int = 30,
     ) -> RunResult:
+        if cmd.startswith('python -c "import base64;'):
+            python = subprocess.list2cmdline([sys.executable]) if os.name == "nt" else shlex.quote(sys.executable)
+            cmd = python + cmd[len("python"):]
         try:
             proc = subprocess.run(
                 cmd,
@@ -252,21 +257,20 @@ class DockerRuntime(Runtime):
                 # 启动失败，返回错误
                 return startup_result
 
-        # 确定容器内工作目录
-        if cwd:
-            # 如果 cwd 是宿主机路径，转换为容器内路径
-            host_cwd = str(Path(cwd).resolve())
-            if Path(host_cwd).is_relative_to(Path(self._repo_path)):
-                relative = str(Path(host_cwd).relative_to(self._repo_path))
-                if relative == '.':
-                    relative = ''
-                # 确保使用正斜杠（容器内是 Linux）
-                relative = relative.replace("\\", "/")
-                container_cwd = f"{self._workdir}/{relative}" if relative else self._workdir
-            else:
-                container_cwd = cwd   # 可能是容器内的绝对路径
+        if cwd and (cwd == self._workdir or cwd.startswith(self._workdir + "/")):
+            container_cwd = posixpath.normpath(cwd)
+        elif cwd and Path(cwd).is_absolute():
+            try:
+                relative = Path(cwd).resolve().relative_to(self._repo_path).as_posix()
+            except ValueError:
+                return RunResult(-1, "", "Working directory must be inside the repository")
+            container_cwd = posixpath.join(self._workdir, relative)
+        elif cwd:
+            container_cwd = posixpath.normpath(posixpath.join(self._workdir, cwd.replace("\\", "/")))
         else:
             container_cwd = self._workdir
+        if container_cwd != self._workdir and not container_cwd.startswith(self._workdir + "/"):
+            return RunResult(-1, "", "Working directory must be inside the repository")
 
         if cmd.startswith('python -c "import base64;'):
             cmd = self._helper_python + cmd[len("python"):]
