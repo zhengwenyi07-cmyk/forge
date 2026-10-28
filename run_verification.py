@@ -15,7 +15,7 @@ def validate_reports(output: Path, run_id: str, instance_ids: set[str]) -> dict:
     report = json.loads(reports[0].read_text(encoding="utf-8"))
     if report.get("error_ids") or report.get("incomplete_ids"):
         raise RuntimeError("Harness infrastructure errors: " + json.dumps(report))
-    completed = set(report.get("completed_ids", []))
+    completed = set(report.get("completed_ids", [])) | set(report.get("empty_patch_ids", []))
     if not instance_ids <= completed:
         raise RuntimeError(f"Missing evaluated instances: {sorted(instance_ids - completed)}")
     for log in (output / "logs" / "run_evaluation" / run_id).rglob("test_output.txt"):
@@ -33,7 +33,7 @@ def main() -> None:
     parser.add_argument("--run-id", default="forge-" + datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S"))
     parser.add_argument("--max-workers", type=int, default=2)
     parser.add_argument("--timeout", type=int, default=1800)
-    parser.add_argument("--image", default="forge-swebench:5.0.2")
+    parser.add_argument("--image", default="forge-swebench:4.1.0")
     parser.add_argument("--build", action="store_true")
     args = parser.parse_args()
     root = Path(__file__).resolve().parent

@@ -14,16 +14,27 @@ git clone <repo-url> && cd coding-agent
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
-# 配置（编辑 config/default.yaml，填入 provider 和 api_key）
-export DEEPSEEK_API_KEY=sk-xxx   # 或 ANTHROPIC_API_KEY / OPENAI_API_KEY
+# 首先构建 Linux Runtime（需要启动 Docker 的 Linux 引擎）
+docker build -f docker/Dockerfile.runtime -t forge-runtime:py311 .
+
+# 本地窗口配置 MiMo；密钥保存在被 Git 忽略的 config/mimo.local.yaml
+python -m entry.configure_mimo
+# 无图形界面的环境可以设置 MIMO_API_KEY，并使用 config/default.yaml
 
 # 验证
-python smoke_test.py
+python -m evaluation.smoke_agent  # 两个真实 MiMo 模型的小任务验证
 
 # 使用
 cd your-project
 agent chat
 ```
+
+修改类任务只有在产生新 diff、且最后一次修改后使用 `test` 工具尝试定向测试，才能调用 `finish` 完成。
+测试失败会明确记录在结果中。只读分析可以使用 `agent run --task-type read_only --task "解释项目结构"`。
+`file_edit` 用于唯一文本替换，`apply_patch` 接受标准 unified diff；大型现有文件禁止 `file_write` 全量覆盖。
+默认命令在 Linux Docker 中执行；`--no-sandbox` 仅支持 Linux/WSL。
+
+修复说明、恢复方式和 Flash/Pro 对照评测见 [docs/architecture-repair.md](docs/architecture-repair.md)。
 
 ---
 
@@ -155,7 +166,7 @@ coding-agent/
 - 写操作确认：`--confirm` 模式下 `git commit`、`pip install` 等需 y/n 确认
 
 **Docker 沙箱**
-`--sandbox` 参数，所有命令在 `python:3.11-slim` 容器里执行，
+默认启用 `--sandbox`，所有命令在预先构建的 `forge-runtime:py311` Linux 容器里执行，
 repo 通过 bind mount 双向同步，默认断网。
 
 **Reflection 机制**
@@ -179,7 +190,7 @@ repo 通过 bind mount 双向同步，默认断网。
   Allow? [y/N]
 ```
 
-`--sandbox` 模式在 Docker 容器中执行，宿主机环境完全隔离。
+`--sandbox` 在 Docker 容器中执行命令，目标仓库通过 bind mount 同步修改。
 
 ---
 
@@ -190,7 +201,7 @@ repo 通过 bind mount 双向同步，默认断网。
 pip install -e ".[dev]"
 
 # 运行测试
-pytest                     # 全量（376 passed，7 skipped）
+pytest                     # 全量；最近验证结果见 docs/repair-results.md
 pytest tests/test_day3.py  # 单个文件
 
 # 可选：更多语言的 tree-sitter 支持
