@@ -24,6 +24,9 @@ def test_manifest_rejects_dataset_drift(tmp_path):
     freeze(dataset, manifest, 20)
     assert len(load_suite(dataset, manifest)[1]) == 20
     dataset.write_text(json.dumps(rows) + " ")
+    assert len(load_suite(dataset, manifest)[1]) == 20
+    rows[0]["base_commit"] = "changed"
+    dataset.write_text(json.dumps(rows))
     with pytest.raises(ValueError, match="fingerprint"):
         load_suite(dataset, manifest)
 

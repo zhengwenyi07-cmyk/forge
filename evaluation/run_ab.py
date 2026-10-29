@@ -28,7 +28,7 @@ def write_json(path, value):
 def code_fingerprint(root: Path):
     git = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
     files = {}
-    for directory in ("agent", "tools", "context", "llm", "entry", "multi_agent", "evaluation"):
+    for directory in ("agent", "tools", "context", "llm", "entry", "multi_agent", "evaluation", "config"):
         for path in sorted((root / directory).glob("*.py")):
             files[path.relative_to(root).as_posix()] = digest(path.read_bytes())
     return {"commit": git, "source_sha256": digest(json.dumps(files, sort_keys=True).encode())}
@@ -38,7 +38,11 @@ def run_trial(row, model, cfg, settings, image, repos_dir, output, fingerprint):
     trial = output / model / row["instance_id"]
     trial.mkdir(parents=True, exist_ok=True)
     result_file = trial / "result.json"
-    identity = {"model": model, "instance_id": row["instance_id"], "base_commit": row["base_commit"], "image": image, "code": fingerprint, "settings": settings}
+    effective = {"context_window": cfg.context.context_window, "repo_map_budget": cfg.context.repo_map_budget,
+                 "repo_map_strategy": cfg.context.repo_map_strategy, "endpoint": cfg.llm.base_url,
+                 "tools": {"shell_timeout": cfg.tools.shell.timeout, "shell_output": cfg.tools.shell.max_output_tokens,
+                           "file_view_lines": cfg.tools.file.max_view_lines}}
+    identity = {"model": model, "instance_id": row["instance_id"], "base_commit": row["base_commit"], "image": image, "code": fingerprint, "settings": settings, "effective_config": effective}
     if result_file.exists():
         saved = json.loads(result_file.read_text())
         if saved["identity"] != identity:
@@ -75,10 +79,13 @@ def run_trial(row, model, cfg, settings, image, repos_dir, output, fingerprint):
             if not check.success:
                 raise RuntimeError(check.stderr)
             task = Task(description=row["problem_statement"], repo_path=str(repo), max_steps=settings["max_steps"], budget_tokens=settings["budget_tokens"])
-            backend = OpenAICompatBackend(model=model, api_key=cfg.llm.api_key, base_url=cfg.llm.base_url, max_tokens=settings["max_tokens"])
+            backend = OpenAICompatBackend(model=model, api_key=cfg.llm.api_key, base_url=cfg.llm.base_url,
+                                          headers=cfg.llm.headers, max_tokens=settings["max_tokens"])
             # Single-agent mode fixes the architecture and excludes scheduling differences.
             registry = _build_registry(cfg, runtime=runtime)
-            agent = Agent(backend, registry, AgentConfig(budget_tokens=settings["budget_tokens"], history_max_messages=40, stream=False), runtime=runtime)
+            agent = Agent(backend, registry, AgentConfig(budget_tokens=settings["budget_tokens"], history_max_messages=40,
+                          context_window=cfg.context.context_window, repo_map_budget=cfg.context.repo_map_budget,
+                          repo_map_strategy=cfg.context.repo_map_strategy, max_output_tokens=settings["max_tokens"], stream=False), runtime=runtime)
             with EventLog.create(task, log_dir=str(trial / "logs")) as log:
                 result = agent.run(task, log)
             record.update(status="infrastructure_error" if result.error else result.status.value, tokens=result.total_tokens, validation=result.validation, summary=result.summary.replace(cfg.llm.api_key, "[REDACTED]"), patch=capture_patch(str(repo), base_ref=base_commit))
@@ -103,6 +110,8 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--harness-image", default="forge-swebench:4.1.0")
     parser.add_argument("--workers", type=int, default=2)
+    parser.add_argument("--map-strategy", choices=("legacy", "lexical", "global", "personalized"), help="Fix one map strategy for both models; use separate output directories for map ablations")
+    parser.add_argument("--repo-map-budget", type=int, help="Fix the same map token budget for both models")
     parser.add_argument("--prepare-only", action="store_true")
     parser.add_argument("--preflight-only", action="store_true", help="Pull images and run the gold smoke without calling either model")
     parser.add_argument("--skip-gold-smoke", action="store_true", help="Only use after a successful gold smoke for these exact images")
@@ -154,6 +163,12 @@ def main():
         print("All official images and gold smoke passed; ready for paired model calls.")
         return
     cfg = load_config(args.config)
+    if args.map_strategy is not None:
+        cfg.context.repo_map_strategy = args.map_strategy
+    if args.repo_map_budget is not None:
+        if not 0 <= args.repo_map_budget < cfg.context.context_window:
+            parser.error("--repo-map-budget must be nonnegative and smaller than context_window")
+        cfg.context.repo_map_budget = args.repo_map_budget
     if not cfg.llm.api_key:
         raise RuntimeError("MiMo key is missing; run python -m entry.configure_mimo")
     fingerprint = code_fingerprint(root)

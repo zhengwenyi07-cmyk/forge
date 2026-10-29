@@ -1,7 +1,7 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "seed": 20261028,
-  "dataset_sha256": "a65323edf726a74c1527bd6728cba1c1eee3be2c2a90a224c737521de5f0d669",
+  "dataset_sha256": "51f5112b9be08207f113b8e6cb012e50e3d085663d5233ebef6f9c9c855e9259",
   "tasks": [
     {
       "instance_id": "astropy__astropy-14995",

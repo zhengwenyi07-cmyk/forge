@@ -11,6 +11,11 @@ def digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def dataset_digest(raw):
+    canonical = json.dumps(json.loads(raw), ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return digest(canonical)
+
+
 def select_tasks(dataset: list[dict], count: int, seed: int = 20261028) -> list[dict]:
     if not 20 <= count <= 50:
         raise ValueError("The paired suite must contain 20 to 50 tasks")
@@ -34,7 +39,7 @@ def select_tasks(dataset: list[dict], count: int, seed: int = 20261028) -> list[
 def freeze(dataset_path: Path, manifest_path: Path, count=30):
     raw = dataset_path.read_bytes()
     rows = select_tasks(json.loads(raw), count)
-    manifest = {"schema_version": 1, "seed": 20261028, "dataset_sha256": digest(raw), "tasks": [{k: r[k] for k in ("instance_id", "repo", "base_commit")} for r in rows], "settings": {"max_steps": 40, "budget_tokens": 80000, "max_tokens": 8192, "temperature": 0, "multi_agent": False, "models": ["mimo-v2.6-flash", "mimo-v2.6-pro"]}}
+    manifest = {"schema_version": 2, "seed": 20261028, "dataset_sha256": dataset_digest(raw), "tasks": [{k: r[k] for k in ("instance_id", "repo", "base_commit")} for r in rows], "settings": {"max_steps": 40, "budget_tokens": 80000, "max_tokens": 8192, "temperature": 0, "multi_agent": False, "models": ["mimo-v2.6-flash", "mimo-v2.6-pro"]}}
     manifest_path.write_bytes((json.dumps(manifest, indent=2) + "\n").encode())
     return manifest
 
@@ -42,7 +47,7 @@ def freeze(dataset_path: Path, manifest_path: Path, count=30):
 def load_suite(dataset_path: Path, manifest_path: Path):
     raw = dataset_path.read_bytes()
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if digest(raw) != manifest["dataset_sha256"]:
+    if (dataset_digest(raw) if manifest.get("schema_version") == 2 else digest(raw)) != manifest["dataset_sha256"]:
         raise ValueError("Dataset fingerprint differs from the frozen manifest")
     by_id = {r["instance_id"]: r for r in json.loads(raw)}
     rows = []
