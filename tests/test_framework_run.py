@@ -61,6 +61,38 @@ def test_failed_fork_patch_survives_worktree_cleanup(real_repo, tmp_path):
     assert "checksum" in apply.execute({"artifact_task_id": result.task_id}).error
 
 
+def test_registry_child_patch_uses_custom_log_directory(real_repo, tmp_path):
+    from config.schema import AppConfig
+    from entry.cli import _build_registry
+    from multi_agent.task_registry import TaskRegistry
+    from tools.runtime import LocalRuntime
+
+    cfg = AppConfig()
+    cfg.agent.log_dir = str(tmp_path / "custom logs")
+    children = TaskRegistry()
+    backend = MockBackend([Action(ActionType.TOOL_CALL, "edit", ToolCall("file_edit", {
+        "path": "app.py", "old_string": "VALUE = 1", "new_string": "VALUE = 2"}))])
+    registry = _build_registry(cfg, runtime=LocalRuntime(str(real_repo)),
+                               task_registry=children, backend=backend, repo_path=str(real_repo))
+    try:
+        delivery = registry.execute_tool("task", {
+            "type": "fork", "task": "Change VALUE", "wait": True, "max_steps": 1,
+        })
+        assert delivery.artifacts
+        task_id = delivery.artifacts[0]["task_id"]
+        manifest = Path(cfg.agent.log_dir) / "artifacts" / task_id / "result.json"
+        assert manifest.is_file(), delivery
+        assert (real_repo / "app.py").read_bytes() == b"VALUE = 1\n"
+        children.poll()
+        result = children.get(task_id).result
+        assert result is not None and result.patch
+        applied = registry.execute_tool("apply_patch", {"artifact_task_id": task_id})
+        assert applied.success, applied.error
+        assert (real_repo / "app.py").read_bytes() == b"VALUE = 2\n"
+    finally:
+        children.shutdown()
+
+
 def test_context_budget_independent_from_run_limit(tmp_path):
     (tmp_path / "a.py").write_text("def old(): pass\n")
     backend = MockBackend([Action(ActionType.FINISH, "", message="done")])

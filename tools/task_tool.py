@@ -64,7 +64,7 @@ class TaskTool(BaseTool):
     │ type     │ 工具集    │ system prompt │ 默认模式  │
     ├──────────┼──────────┼──────────────┼──────────┤
     │ explore  │ 只读探索  │ 内置探索 prompt│ wait=True │
-    │ review   │ 只读+lint │ 内置审查 prompt│ wait=True │
+    │ review   │ 只读审查  │ 内置审查 prompt│ wait=True │
     │ fork     │ 父-黑名单  │ 父 prompt+前缀 │ wait=False│
     └──────────┴──────────┴──────────────┴──────────┘
 
@@ -130,7 +130,7 @@ class TaskTool(BaseTool):
             "Types:\n"
             "- 'explore': Read-only codebase exploration (search, read, find symbols). "
             "Blocks until complete (up to 30s).\n"
-            "- 'review': Code review with read-only tools + shell for linters/tests. "
+            "- 'review': Code review with read-only inspection tools. "
             "Blocks until complete (up to 30s).\n"
             "- 'fork': Dynamic parallel work with same tools as parent (minus blacklist). "
             "Runs in background and notifies when done."

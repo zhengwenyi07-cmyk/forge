@@ -145,6 +145,7 @@ def _build_registry(cfg, confirm_callback=None, runtime=None,
             task_registry=task_registry,
             repo_path=repo_path,
             runtime=runtime,
+            log_dir=cfg.agent.log_dir,
         ))
         registry.register(TaskWaitTool(task_registry)).register(TaskMessageTool(task_registry))
 

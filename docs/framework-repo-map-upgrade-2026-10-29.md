@@ -23,7 +23,7 @@
 | 文件边界 | 保留内部符号链接；绑定 Runtime 的文件写入目标必须解析到工作区内部 | `tools/file_ops.py`、`tools/file_tool.py` |
 | 完成门禁 | 保留新 diff + 最后修改后定向测试尝试门禁；运行状态与验证状态分开记录 | `agent/core.py`、`agent/task.py` |
 | 失败产物 | 完成、步数/预算耗尽、取消、模型错误、异常、Ctrl+C 都经过统一保存；保存失败保留子 worktree | `agent/run_context.py`、`multi_agent/sub_agent.py` |
-| 子任务交付 | 返回 base、状态、摘要、产物引用及 patch 预览；父任务可按任务 ID 应用原始 patch，无需模型重新抄写 | `tools/task_tool.py`、`tools/file_tool.py` |
+| 子任务交付 | 返回 base、状态、摘要、产物引用及 patch 预览；父子任务共用配置的日志/产物目录，父任务可按任务 ID 应用原始 patch，无需模型重新抄写 | `entry/cli.py`、`tools/task_tool.py`、`tools/file_tool.py` |
 | 共享累计预算 | 父子请求共用线程安全账本，发送前预留、返回后按 usage 结算；重复通知不重复计费 | `agent/run_context.py` |
 | 终止顺序 | 父退出时关闭新请求入口，先通知全部子任务，再按一个总等待期限回收；取消期间返回的 Action 不执行 | Agent、TaskRegistry、SubAgent |
 | 工具消息 | 保留调用 ID 与 assistant.tool_calls/tool 结果；OpenAI/Anthropic 分别转换；按完整调用/结果组裁剪 | `llm/`、`context/` |
@@ -83,7 +83,7 @@ context:
 
 ## 5. 验证记录
 
-最终全量回归：**486 passed，18 skipped，136.78 秒**（`logs/framework-final-tests.txt`）。跳过项涉及 Docker 不可用及 Windows 平台能力。`git diff --check` 通过，wheel 构建通过，检查安装包包含新增模块且没有本地密钥配置或真实 Key；冻结 30 题也通过本机与 Git LF 数据指纹一致性检查。
+主体改动的全量回归：**486 passed，18 skipped，136.78 秒**（`logs/framework-final-tests.txt`）。最后复核补充了自定义日志目录的子任务产物交付修复：新增回归先复现旧行为找不到产物的问题，修复后包含该用例的相关测试为 **66 passed，1 skipped，38.78 秒**。跳过项涉及 Docker 不可用及 Windows 平台能力。`git diff --check` 通过，wheel 构建通过，检查安装包包含新增模块且没有本地密钥配置或真实 Key；冻结 30 题也通过本机与 Git LF 数据指纹一致性检查。
 
 主要新增回归覆盖长 Unicode stdin、字面量 Git 参数、权限与确认、失败 patch 清理后应用、校验篡改、保存失败保留 worktree、请求中取消、父子记账、原生消息配对、索引与搜索一致性、地图缓存与预算、语义指纹。
 
