@@ -35,6 +35,7 @@ agent chat
 默认命令在 Linux Docker 中执行；`--no-sandbox` 仅支持 Linux/WSL。
 
 修复说明、恢复方式和 Flash/Pro 对照评测见 [docs/architecture-repair.md](docs/architecture-repair.md)。
+本次框架修复、个性化 PageRank 地图、配置与验证记录见 [框架与 repo-map 升级说明](docs/framework-repo-map-upgrade-2026-10-29.md)。
 
 ---
 
@@ -89,11 +90,22 @@ llm:
 
 agent:
   max_steps: 40           # 每轮最大步数
-  budget_tokens: 80000    # token 预算
+  run_token_limit: 80000  # 整次任务累计用量，含子 Agent；兼容旧名 budget_tokens
 
 context:
-  repo_map_budget: 8000   # repo-map 注入量
+  context_window: 32768   # 单次请求窗口，独立于累计运行预算
+  repo_map_budget: 4000   # 地图的估算 token 上限
+  repo_map_strategy: personalized  # personalized | global | lexical | legacy
   history_window: 20      # 保留历史轮数
+```
+
+`read_only` 在工具注册表中限制写入、Shell、测试和 fork。启用 `--confirm` 后，文件编辑、测试、Git 写入及非简单只读 Shell 统一经过确认。
+所有运行都会尝试在日志目录下保存 `artifacts/<task_id>/result.json`；包含修改时另存 `changes.patch`。父 Agent 可通过 `apply_patch` 的 `artifact_task_id` 参数应用子任务产物，工具先校验哈希与补丁上下文。
+
+无需调用模型即可比较地图：
+
+```bash
+python -m evaluation.repo_map_probe --repo . --task "修复 Agent.run 的工具结果历史" --expected agent/core.py --output logs/map-probe.json
 ```
 
 ---
