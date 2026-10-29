@@ -39,6 +39,11 @@ class IsolatedWorktree:
         relative = Path(gitdir).relative_to(common).as_posix()
         return [(str(common), "/forge-git")], {"GIT_DIR": f"/forge-git/{relative}", "GIT_WORK_TREE": workdir}
 
+    def retain(self):
+        """Prevent TemporaryDirectory's finalizer deleting the sole recovery copy."""
+        self._temp._finalizer.detach()
+        return str(self.root)
+
     def cleanup(self):
         expected = (Path(self._temp.name) / "repo").absolute()
         if self.root.absolute() != expected or not expected.is_relative_to(Path(self._temp.name).absolute()):

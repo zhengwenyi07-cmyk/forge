@@ -258,6 +258,8 @@ class TokenBudget:
         """
         if not messages or token_limit < 1:
             return []
+        if any(m.get("tool_calls") or m.get("tool_call_id") for m in messages):
+            return self._trim_tool_history(messages, token_limit)
         if len(messages) == 1:
             return [{**messages[0], "content": self.trim_to(messages[0].get("content", ""), token_limit)}]
 
@@ -285,6 +287,53 @@ class TokenBudget:
             selected.append(msg)
             remaining -= cost
         return [first, *([notice] if include_notice else []), *reversed(selected)]
+
+    def _trim_tool_history(self, messages, token_limit):
+        import json
+        def cost(group):
+            return sum(estimate_tokens(json.dumps(m, ensure_ascii=False)) for m in group)
+        groups, i = [], 1
+        while i < len(messages):
+            message = messages[i]
+            if message.get("tool_calls"):
+                ids = {call["id"] for call in message["tool_calls"]}
+                results, j = [], i + 1
+                while j < len(messages) and messages[j].get("tool_call_id") in ids:
+                    results.append(messages[j])
+                    j += 1
+                if {m["tool_call_id"] for m in results} == ids:
+                    groups.append([message, *results])
+                i = j
+            else:
+                if not message.get("tool_call_id"):
+                    groups.append([message])
+                i += 1
+        valid = [messages[0], *(message for group in groups for message in group)]
+        if cost(valid) <= token_limit:
+            return valid
+        first = {"role": messages[0]["role"], "content": ""}
+        first_limit = max(0, min(token_limit // 3, token_limit - cost([first])))
+        first["content"] = self.trim_to(messages[0].get("content", ""), first_limit)
+        if cost([first]) > token_limit:
+            return []
+        remaining = token_limit - cost([first])
+        chosen = []
+        for group in reversed(groups):
+            if cost(group) <= remaining:
+                chosen.insert(0, group)
+                remaining -= cost(group)
+            else:
+                if not chosen and remaining > 30:
+                    latest = {"role": "user", "content": "[Oversized tool exchange omitted]\n" + group[-1].get("content", "")}
+                    limit = remaining - 15
+                    latest["content"] = _bounded_text(latest["content"], limit, keep_tail=True)
+                    while cost([latest]) > remaining and limit > 1:
+                        limit = max(1, limit - 10)
+                        latest["content"] = _bounded_text(latest["content"], limit, keep_tail=True)
+                    if cost([latest]) <= remaining:
+                        chosen.append([latest])
+                break
+        return [first, *(message for group in chosen for message in group)]
 
     def fit_all(
         self,

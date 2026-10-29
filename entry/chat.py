@@ -273,6 +273,10 @@ class ChatSession:
         agent_cfg = AgentConfig(
             max_steps=config.agent.max_steps,
             budget_tokens=config.agent.budget_tokens,
+            context_window=config.context.context_window,
+            repo_map_budget=config.context.repo_map_budget,
+            max_output_tokens=config.llm.max_tokens,
+            repo_map_strategy=config.context.repo_map_strategy,
             # history_max_messages 设为 history_window * 2，
             # 因为一轮对话通常包含 1 条用户输入 + 多条 assistant 回复
             history_max_messages=config.context.history_window * 2,

@@ -152,6 +152,10 @@ class TaskRegistry:
                     steps_taken=task.result.steps_taken if task.result else 0,
                     total_tokens=task.result.total_tokens if task.result else 0,
                     patch=task.result.patch if task.result else None,
+                    artifact_path=task.result.artifact_path if task.result else None,
+                    base_commit=task.result.base_commit if task.result else None,
+                    artifact_error=task.result.artifact_error if task.result else None,
+                    recovery_worktree=task.result.recovery_worktree if task.result else None,
                 )
                 notifications.append(notif)
             self._pending_notifications.clear()
@@ -200,11 +204,17 @@ class TaskRegistry:
                 if task.status == "running":
                     running.append(task)
 
-        # 向所有运行中的子 Agent 发送停止信号并等待
+        # Signal every child before waiting; one slow call must not delay the
+        # cancellation of its siblings. Use one deadline for the whole group.
+        import time
+        deadline = time.monotonic() + timeout
+        for task in running:
+            if task._sub_agent is not None:
+                task._sub_agent.request_stop()
         for task in running:
             agent = task._sub_agent
             if agent is not None:
-                agent.stop(timeout=timeout)
+                agent.stop(timeout=max(0, deadline - time.monotonic()))
 
         # 拉取最终状态（包括被中断后的结果）
         self.poll()

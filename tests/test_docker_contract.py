@@ -19,6 +19,24 @@ def docker_ready():
 pytestmark = pytest.mark.skipif(not docker_ready(), reason="Build forge-runtime:py311 to run Linux contract tests")
 
 
+@pytest.mark.parametrize("size", [25000, 100000])
+def test_large_unicode_payload_and_literal_git_arguments(tmp_path, size):
+    from tools.git_tool import GitAddTool, GitCommitTool
+    content = "# payload\n" + ("文本é" * size) + "\nEND\n"
+    with DockerRuntime(str(tmp_path)) as runtime:
+        assert runtime.preflight().success
+        assert runtime.exec_argv(["git", "init"]).success
+        assert FileWriteTool(runtime).execute({"path": "-payload.txt", "content": content}).success
+        assert (tmp_path / "-payload.txt").read_bytes() == content.encode("utf-8")
+        assert FileEditTool(runtime).execute({"path": "-payload.txt", "old_string": "END", "new_string": "FINISHED"}).success
+        assert (tmp_path / "-payload.txt").read_bytes() == content.replace("END", "FINISHED").encode("utf-8")
+        assert GitAddTool(runtime).execute({"paths": ["-payload.txt"]}).success
+        message = "literal $(touch shell-marker) ; 'quoted' \"text\""
+        assert GitCommitTool(runtime).execute({"message": message}).success
+        assert runtime.exec_argv(["git", "log", "-1", "--format=%B"]).stdout.strip() == message
+        assert not (tmp_path / "shell-marker").exists()
+
+
 def test_docker_search_view_and_precise_edit(tmp_path):
     name = "quoted ' file.py"
     path = tmp_path / name

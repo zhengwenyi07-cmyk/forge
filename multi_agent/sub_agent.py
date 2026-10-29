@@ -70,7 +70,7 @@ def build_sub_agent_registry(
         新的 ToolRegistry，只包含过滤后的工具
     """
     bl = blacklist or SUB_AGENT_BLACKLIST
-    sub_registry = ToolRegistry()
+    sub_registry = ToolRegistry(parent_registry.confirm_callback, parent_registry.read_only)
 
     for name, tool in parent_registry._tools.items():
         # 黑名单过滤（所有子 Agent 都不能用的工具）
@@ -201,13 +201,12 @@ class SubAgent:
         # 复制父 Agent 最近历史作为缓存前缀（最多 10 条）
         parent_msgs = parent_history.to_list() if parent_history else []
         recent = parent_msgs[-min(10, len(parent_msgs)):] if parent_msgs else []
+        while recent and recent[0].tool_call_id:
+            recent.pop(0)
         for msg in recent:
             if getattr(msg, "role", None) == "system":
                 continue
-            child_history.add(LLMMessage(
-                role=msg.role if hasattr(msg, 'role') else "user",
-                content=msg.content if hasattr(msg, 'content') else str(msg),
-            ))
+            child_history.add(LLMMessage(**msg.to_dict()))
         return child_history
 
     # ── 生命周期管理 ───────────────────────────────────────────────
@@ -274,10 +273,16 @@ class SubAgent:
                 if self._child_runtime:
                     self._child_runtime.cleanup()
                 if self._isolated_worktree:
-                    self._isolated_worktree.cleanup()
+                    if self._result and self._result.artifact_error:
+                        self._result.recovery_worktree = self._isolated_worktree.retain()
+                    else:
+                        self._isolated_worktree.cleanup()
             except Exception as exc:
                 self._error = f"Worktree cleanup failed: {exc}"
             self._done.set()
+
+    def request_stop(self):
+        self._stop_event.set()
 
     def stop(self, timeout: float = 10.0) -> RunResult | None:
         """

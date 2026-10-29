@@ -26,8 +26,6 @@ class TestIsReadonly:
         "find . -name '*.py'",
         "git status", "git diff HEAD", "git log --oneline",
         "git branch -a",
-        "python -m pytest tests/",
-        "pytest tests/test_foo.py",
         "echo hello",
         "pwd", "whoami",
         "diff a.py b.py",
@@ -60,7 +58,7 @@ class TestNeedsConfirm:
         assert not _needs_confirm("ls -la")
         assert not _needs_confirm("cat file.py")
         assert not _needs_confirm("git status")
-        assert not _needs_confirm("pytest tests/")
+        assert _needs_confirm("pytest tests/")
 
     @pytest.mark.parametrize("cmd", [
         "rm file.py",
@@ -78,10 +76,9 @@ class TestNeedsConfirm:
     def test_dangerous_commands_need_confirm(self, cmd):
         assert _needs_confirm(cmd), f"Expected {cmd!r} to need confirmation"
 
-    def test_unknown_safe_command_no_confirm(self):
-        # 未知命令但不含危险关键词，不需要确认
-        assert not _needs_confirm("python parse_data.py")
-        assert not _needs_confirm("node server.js")
+    def test_unknown_commands_require_confirm(self):
+        assert _needs_confirm("python parse_data.py")
+        assert _needs_confirm("node server.js")
 
 
 # ===========================================================================
@@ -242,11 +239,11 @@ class TestConfirmInAgentFlow:
         registry = ToolRegistry().register(ShellTool(confirm_callback=always_deny))
         agent = Agent(backend, registry, AgentConfig(max_steps=5))
 
-        task = Task(task_type="read_only", task_id="conf1", description="test", repo_path=str(tmp_path), max_steps=5)
+        task = Task(task_type="modify", task_id="conf1", description="test", repo_path=str(tmp_path), max_steps=5)
         with EventLog.create(task, log_dir=str(tmp_path / "logs")) as log:
             result = agent.run(task, log)
 
-        assert result.is_success()
+        assert not result.is_success()  # denied write cannot satisfy modification gate
 
         # 检查 event log：第一个 observation 应该包含拒绝信息
         events = log.replay()

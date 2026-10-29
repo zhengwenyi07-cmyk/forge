@@ -15,7 +15,7 @@ tools/base.py
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from agent.task import Observation, ObservationStatus
@@ -36,6 +36,8 @@ class ToolResult:
     output: str                         # 工具的文本输出，已做截断处理
     error: str | None = None            # 失败时的错误信息
     test_attempted: bool = False
+    validation_status: str | None = None
+    artifacts: list[dict] = field(default_factory=list)
 
     def to_observation(self, tool_name: str) -> Observation:
         """转换为 Observation，供 core.py 写入 EventLog 和注入上下文。"""
@@ -60,6 +62,8 @@ class BaseTool(ABC):
     - schema:   JSON Schema 描述，告诉 LLM 这个工具怎么用
     - execute(): 实际执行逻辑
     """
+
+    read_only = False
 
     @property
     @abstractmethod
@@ -115,8 +119,18 @@ class ToolRegistry:
     线程安全：当前 v1 单线程，不加锁。
     """
 
-    def __init__(self) -> None:
+    def __init__(self, confirm_callback=None, read_only=False) -> None:
         self._tools: dict[str, BaseTool] = {}
+        self.confirm_callback = confirm_callback
+        self.read_only = read_only
+
+    def for_task(self, task_type):
+        scoped = ToolRegistry(self.confirm_callback, self.read_only or task_type == "read_only")
+        scoped._tools = dict(self._tools)
+        return scoped
+
+    def _allowed(self, tool, params):
+        return not self.read_only or (tool.read_only and not (tool.name == "task" and params.get("type") == "fork"))
 
     def register(self, tool: BaseTool) -> "ToolRegistry":
         """
@@ -144,6 +158,17 @@ class ToolRegistry:
         tool = self._tools[name]
         try:
             validate_params(params, tool.parameters_schema)
+            if not self._allowed(tool, params):
+                return ToolResult(False, "", f"Tool '{name}' is not permitted in a read-only task")
+            if self.confirm_callback is not None and not tool.read_only:
+                from tools.shell_tool import _is_readonly, _check_blocked
+                command = params.get("cmd") or params.get("command")
+                if command and _check_blocked(command):
+                    return ToolResult(False, "", "Command blocked for safety")
+                if not (name == "shell" and command and _is_readonly(command)):
+                    display = command or f"{name}: {params}"
+                    if not self.confirm_callback(display):
+                        return ToolResult(False, "", f"Operation rejected by user: {name}")
             return tool.execute(params)
         except Exception as exc:
             # 工具内部未捕获的异常，降级为 error 结果
@@ -155,7 +180,7 @@ class ToolRegistry:
 
     def get_schemas(self) -> list[LLMToolSchema]:
         """返回所有已注册工具的 schema，供注入 LLM。"""
-        return [tool.to_llm_schema() for tool in self._tools.values()]
+        return [tool.to_llm_schema() for tool in self._tools.values() if self._allowed(tool, {})]
 
     @property
     def tools(self) -> dict[str, "BaseTool"]:
@@ -191,6 +216,11 @@ def validate_params(params, schema, path="params"):
         for key, value in params.items():
             if key in schema.get("properties", {}):
                 validate_params(value, schema["properties"][key], f"{path}.{key}")
+            elif schema.get("additionalProperties") is False:
+                raise ValueError(f"{path}.{key} is not allowed")
+    if isinstance(params, list) and "items" in schema:
+        for index, value in enumerate(params):
+            validate_params(value, schema["items"], f"{path}[{index}]")
     if isinstance(params, str) and len(params) < schema.get("minLength", 0):
         raise ValueError(f"{path} is too short")
     if type(params) in (int, float):
@@ -207,6 +237,8 @@ class NoopTool(BaseTool):
     测试专用工具，execute() 直接返回成功，不做任何实际操作。
     用于在不依赖真实文件系统/shell 的情况下测试 core.py 流程。
     """
+
+    read_only = True
 
     def __init__(self, tool_name: str = "noop", output: str = "ok") -> None:
         self._name = tool_name

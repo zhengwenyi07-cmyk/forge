@@ -17,6 +17,7 @@ Shell 命令执行工具。四层防护：
 from __future__ import annotations
 
 import re
+import shlex
 import subprocess
 from typing import Any, Callable
 
@@ -50,11 +51,9 @@ _READONLY_PREFIXES: tuple[str, ...] = (
     "pwd", "whoami", "which", "type",
     "find", "locate",
     "grep", "egrep", "fgrep", "rg", "ag",
-    "wc", "sort", "uniq", "cut", "awk", "sed -n",
+    "wc", "sort", "uniq", "cut",
     "diff", "diff3",
     "file", "stat",
-    "python -c", "python3 -c",
-    "python -m pytest", "python3 -m pytest", "pytest",
     "git status", "git diff", "git log", "git show",
     "git branch", "git tag", "git remote",
     "git stash list",
@@ -114,9 +113,13 @@ class ShellTool(BaseTool):
         self,
         confirm_callback: ConfirmCallback | None = None,
         runtime: Runtime | None = None,
+        timeout: int = 30,
+        max_output_tokens: int = 1000,
     ) -> None:
         self._confirm_callback = confirm_callback
         self._runtime = runtime or LocalRuntime()
+        self._timeout = timeout
+        self._max_output_chars = max_output_tokens * 4
 
     @property
     def name(self) -> str:
@@ -153,7 +156,7 @@ class ShellTool(BaseTool):
 
     def execute(self, params: dict[str, Any]) -> ToolResult:
         cmd: str = params.get("cmd", "").strip()
-        timeout: int = int(params.get("timeout", 30))
+        timeout: int = min(int(params.get("timeout", self._timeout)), self._timeout)
         cwd: str | None = params.get("cwd", None)
 
         if not cmd:
@@ -192,7 +195,7 @@ class ShellTool(BaseTool):
     def _run(self, cmd: str, timeout: int, cwd: str | None) -> ToolResult:
         """通过 runtime 执行命令（本地或 Docker 沙箱）。"""
         result = self._runtime.exec(cmd, cwd=cwd, timeout=timeout)
-        output = _truncate(result.output, MAX_OUTPUT_CHARS)
+        output = _truncate(result.output, self._max_output_chars)
         if not result.success:
             # 区分 timeout 和普通错误，error 字段包含可读原因
             if "timed out" in result.stderr.lower():
@@ -218,15 +221,34 @@ def _check_blocked(cmd: str) -> str | None:
 
 
 def _is_readonly(cmd: str) -> bool:
-    """
-    判断命令是否在只读白名单里。
-    包含 > 写重定向的命令不算只读（即使命令名在白名单里）。
-    """
-    # 包含写重定向（> 但不是 >>）时不算只读
-    # 用正则精确匹配：>[^>] 是写重定向，>> 是追加（相对安全）
-    import re as _re
-    if _re.search(r'(?<![>])>(?![>])', cmd):
+    """Conservative confirmation exemption; interpreters/tests always confirm."""
+    if any(c in cmd for c in (">", "<", ";", "&", "|", "`", "$", "\n", "\r")):
         return False
+    try:
+        args = shlex.split(cmd)
+    except ValueError:
+        return False
+    if not args:
+        return False
+    if args[0] in ("env", "date", "hostname") and len(args) > 1:
+        return False
+    if args[0] == "find" and any(a in ("-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf", "-fls") for a in args):
+        return False
+    if args[0] in ("sort", "tree") and any(a == "-o" or a.startswith(("-o", "--output")) for a in args[1:]):
+        return False
+    if args[0] == "file" and any(a.startswith("-C") or a == "--compile" for a in args[1:]):
+        return False
+    if args[0] in ("rg", "ag") and any(a.startswith(("--pre", "--hostname-bin")) for a in args[1:]):
+        return False
+    if args[0] == "git" and len(args) > 1:
+        if any(a.startswith(("--output", "--ext-diff", "--textconv")) for a in args[2:]):
+            return False
+        if args[1] == "branch" and any(a not in ("-a", "-r", "--all", "--remotes", "--list", "--show-current") for a in args[2:]):
+            return False
+        if args[1] == "tag" and args[2:]:
+            return False
+        if args[1] == "remote" and any(a not in ("-v", "--verbose") for a in args[2:]):
+            return False
     stripped = cmd.strip().lower()
     for prefix in _READONLY_PREFIXES:
         if stripped == prefix or stripped.startswith(prefix + " "):
@@ -235,14 +257,7 @@ def _is_readonly(cmd: str) -> bool:
 
 
 def _needs_confirm(cmd: str) -> bool:
-    """
-    判断命令是否需要用户确认。
-    不在白名单 且 包含危险关键词 → 需要确认。
-    """
-    if _is_readonly(cmd):
-        return False
-    cmd_lower = cmd.lower()
-    return any(kw in cmd_lower for kw in _CONFIRM_KEYWORDS)
+    return not _is_readonly(cmd)
 
 
 def _truncate(text: str, max_chars: int) -> str:

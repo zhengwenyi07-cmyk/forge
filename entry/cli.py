@@ -115,13 +115,14 @@ def _build_registry(cfg, confirm_callback=None, runtime=None,
     from tools.test_tool import PytestTool
 
     registry = (
-        ToolRegistry()
-        .register(ShellTool(confirm_callback=confirm_callback, runtime=runtime))
+        ToolRegistry(confirm_callback=confirm_callback)
+        .register(ShellTool(runtime=runtime, timeout=cfg.tools.shell.timeout,
+                            max_output_tokens=cfg.tools.shell.max_output_tokens))
         .register(FileReadTool(runtime=runtime))
-        .register(FileViewTool(runtime=runtime))
+        .register(FileViewTool(runtime=runtime, max_view_lines=cfg.tools.file.max_view_lines))
         .register(FileWriteTool(runtime=runtime))
         .register(FileEditTool(runtime=runtime))
-        .register(ApplyPatchTool(runtime=runtime))
+        .register(ApplyPatchTool(runtime=runtime, artifact_root=Path(cfg.agent.log_dir) / "artifacts"))
         .register(FinishTool())
         .register(GiveUpTool())
         .register(SearchTextTool(runtime=runtime))
@@ -373,6 +374,10 @@ def run(
     agent_config = AgentConfig(
         max_steps=config.agent.max_steps,
         budget_tokens=config.agent.budget_tokens,
+        context_window=config.context.context_window,
+        repo_map_budget=config.context.repo_map_budget,
+        max_output_tokens=config.llm.max_tokens,
+        repo_map_strategy=config.context.repo_map_strategy,
         history_max_messages=config.context.history_window * 2,
         stream=stream,
         stream_callback=_stream_cb if stream else None,

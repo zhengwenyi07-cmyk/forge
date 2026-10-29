@@ -32,7 +32,11 @@ def read_window(path: str, start_line: int, window_size: int) -> str:
     return json.dumps({"total": total, "lines": selected}, ensure_ascii=True)
 
 
-def atomic_write(path: Path, data: bytes) -> None:
+def atomic_write(path: Path, data: bytes, workspace_root: str | None = None) -> None:
+    # Match read semantics: edit the referent, preserving the symlink itself.
+    path = path.resolve()
+    if workspace_root and not path.is_relative_to(Path(workspace_root).resolve()):
+        raise ValueError("Write target resolves outside the task workspace")
     path.parent.mkdir(parents=True, exist_ok=True)
     mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else None
     fd, temp = tempfile.mkstemp(prefix=".forge-", dir=path.parent)
@@ -47,7 +51,7 @@ def atomic_write(path: Path, data: bytes) -> None:
             os.unlink(temp)
 
 
-def write_file(path: str, content: str) -> str:
+def write_file(path: str, content: str, workspace_root: str | None = None) -> str:
     target = Path(path)
     if target.exists():
         old = target.read_bytes()
@@ -55,11 +59,12 @@ def write_file(path: str, content: str) -> str:
             raise ValueError("Full overwrite blocked for large existing file; use file_edit or apply_patch.")
         if len(old.splitlines()) > 50 and len(content.splitlines()) < len(old.splitlines()) / 2:
             raise ValueError("Full overwrite would delete over half the file; use file_edit or apply_patch.")
-    atomic_write(target, content.encode("utf-8"))
+    atomic_write(target, content.encode("utf-8"), workspace_root)
     return f"Written {len(content.splitlines())} lines to {path}"
 
 
-def edit_file(path: str, old_string: str, new_string: str, expected_sha256: str | None = None) -> str:
+def edit_file(path: str, old_string: str, new_string: str, expected_sha256: str | None = None,
+              workspace_root: str | None = None) -> str:
     if not old_string:
         raise ValueError("old_string must not be empty")
     target = Path(path)
@@ -83,6 +88,6 @@ def edit_file(path: str, old_string: str, new_string: str, expected_sha256: str 
     data = after.replace("\n", newline).encode("utf-8")
     if target.read_bytes() != before_bytes:
         raise ValueError("File changed while preparing edit; retry after reading it")
-    atomic_write(target, data)
+    atomic_write(target, data, workspace_root)
     diff = "".join(difflib.unified_diff(normalized.splitlines(True), after.splitlines(True), fromfile=path, tofile=path))
     return f"Edited {path}. sha256={hashlib.sha256(data).hexdigest()}\n{diff[:8000]}"

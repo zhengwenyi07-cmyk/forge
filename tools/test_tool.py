@@ -81,8 +81,11 @@ class PytestTool(BaseTool):
         # 决定测试路径
         test_path = params.get("path", "")
         command = params.get("command", "")
+        from tools.shell_tool import _check_blocked
+        if command and _check_blocked(command):
+            return ToolResult(False, "", "Command blocked for safety")
         if not test_path and not command:
-            if (cwd_path / "tests").exists():
+            if (self._runtime.exec_argv(["test", "-d", "tests"], cwd=cwd).success if not isinstance(self._runtime, LocalRuntime) else (Path(cwd or self._runtime.repo_path or Path.cwd()) / "tests").exists()):
                 test_path = "tests/"
             else:
                 # 没有 tests/ 目录时不要扫全项目（会触发无关文件的 collection 错误）
@@ -104,18 +107,20 @@ class PytestTool(BaseTool):
             "-q",               # 安静模式：只输出失败详情和最终统计
         ]
         if extra_args:
-            cmd_parts.extend(extra_args.split())
+            cmd_parts.extend(shlex.split(extra_args))
 
         if isinstance(self._runtime, LocalRuntime):
             cmd_parts[0] = sys.executable
         cmd_str = command or (subprocess.list2cmdline(cmd_parts) if os.name == 'nt' and isinstance(self._runtime, LocalRuntime) else shlex.join(cmd_parts))
-        run_result = self._runtime.exec(cmd_str, cwd=cwd, timeout=PYTEST_TIMEOUT)
+        run_result = (self._runtime.exec(command, cwd=cwd, timeout=PYTEST_TIMEOUT) if command
+                      else self._runtime.exec_argv(cmd_parts, cwd=cwd, timeout=PYTEST_TIMEOUT))
         if "timed out" in run_result.stderr.lower():
             return ToolResult(
                 success=False,
                 output="",
                 error=f"pytest timed out after {PYTEST_TIMEOUT}s",
                 test_attempted=True,
+                validation_status="blocked",
             )
         raw = run_result.output
         success = run_result.returncode == 0
@@ -128,6 +133,7 @@ class PytestTool(BaseTool):
             output=output,
             error=None if success else f"pytest exited with code {run_result.returncode}",
             test_attempted=True,
+            validation_status={0: "passed", 1: "failed", 2: "error", 5: "blocked"}.get(run_result.returncode, "blocked"),
         )
 
 

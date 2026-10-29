@@ -55,6 +55,8 @@ SHORT_TASK_TIMEOUT = 30  # 秒
 
 
 class TaskTool(BaseTool):
+    read_only = True
+
     """
     Spawn 子 Agent 执行 explore / review / fork 任务。
 
@@ -110,6 +112,10 @@ class TaskTool(BaseTool):
         self._parent_system_prompt = system_prompt
 
     # ── BaseTool 接口 ──────────────────────────────────────────────
+
+    def set_run_context(self, context, config):
+        self._run_context = context
+        self._agent_config = config
 
     @property
     def name(self) -> str:
@@ -230,6 +236,12 @@ class TaskTool(BaseTool):
             runtime=self._runtime,
             log_dir=self._log_dir,
         )
+        if hasattr(self, "_run_context"):
+            sub_agent._config.budget_ledger = self._run_context.ledger
+            sub_agent._config.context_window = self._agent_config.context_window
+            sub_agent._config.repo_map_budget = self._agent_config.repo_map_budget
+            sub_agent._config.repo_map_strategy = self._agent_config.repo_map_strategy
+            sub_agent._config.max_output_tokens = self._agent_config.max_output_tokens
 
         # 注册并关联
         bg_task = self._task_registry.spawn(sub_agent, agent_type)
@@ -265,33 +277,37 @@ class TaskTool(BaseTool):
         self, task_id: str, agent_type: str, result
     ) -> ToolResult:
         """格式化已完成的子 Agent 结果为 ToolResult。"""
+        artifacts = [{"task_id": task_id, "status": result.status.value, "base_commit": result.base_commit,
+                      "artifact_path": result.artifact_path, "summary": result.summary[:500],
+                      "artifact_error": result.artifact_error, "recovery_worktree": result.recovery_worktree}]
         if result.is_success():
             return ToolResult(
                 success=True,
+                artifacts=artifacts,
                 output=(
                     f"## Sub-agent [{task_id}] ({agent_type}) — COMPLETED\n"
                     f"Steps: {result.steps_taken} | Tokens: {result.total_tokens}\n\n"
                     f"{result.summary}"
-                    + (f"\n\nChild patch (review and apply using apply_patch):\n{result.patch}" if result.patch else "")
+                    + (f"\n\nChild patch preview (apply_patch artifact_task_id={task_id}):\n{result.patch[:8000]}" if result.patch else "")
                 ),
             )
         else:
             return ToolResult(
                 success=False,
+                artifacts=artifacts,
                 output=(
                     f"## Sub-agent [{task_id}] ({agent_type}) — FAILED\n"
                     f"Status: {result.status.value}\n"
                     f"{result.summary}"
+                    + (f"\nPartial patch preview (inspect validation before apply_patch artifact_task_id={task_id}):\n{result.patch[:8000]}" if result.patch else "")
+                    + (f"\nArtifacts: {result.artifact_path}" if result.artifact_path else "")
                 ),
                 error=result.error or result.summary,
             )
 
     def _build_fork_prompt(self) -> str:
         """Fork 子 Agent：在父 system prompt 前追加 fork 模式前缀。"""
-        parent_prompt = self._parent_system_prompt
-        if not parent_prompt:
-            return FORK_SYSTEM_PROMPT_PREFIX
-        return FORK_SYSTEM_PROMPT_PREFIX + "\n" + parent_prompt
+        return FORK_SYSTEM_PROMPT_PREFIX
 
     def __repr__(self) -> str:
         active = self._task_registry.active_count() if self._task_registry else 0

@@ -134,6 +134,12 @@ def _to_anthropic_messages(messages: list[LLMMessage]) -> list[dict]:
                     "content": msg.content,
                 }],
             })
+        elif msg.tool_calls:
+            import json
+            blocks = ([{"type": "text", "text": msg.content}] if msg.content else [])
+            blocks += [{"type": "tool_use", "id": call["id"], "name": call["function"]["name"],
+                        "input": json.loads(call["function"]["arguments"])} for call in msg.tool_calls]
+            result.append({"role": "assistant", "content": blocks})
         else:
             result.append({"role": msg.role, "content": msg.content})
     return result
@@ -181,6 +187,7 @@ def _parse_anthropic_response(response: Any) -> Action:
                     tool_call=ToolCall(
                         name=block.name,
                         params=dict(block.input),
+                        **({"id": block.id} if isinstance(getattr(block, "id", None), str) and block.id else {}),
                     ),
                 )
         # stop_reason 是 tool_use 但没找到 block（理论上不会发生）

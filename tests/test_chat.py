@@ -191,7 +191,7 @@ class TestChatEdgeCases:
         assert ok
         assert session.total_steps == 4
 
-    def test_repo_map_cache_persists_across_rounds(self, tmp_path, cfg, registry):
+    def test_repo_map_refreshes_task_ranking_across_rounds(self, tmp_path, cfg, registry):
         """同一 repo 的 repo_map 应在多轮间共享缓存，只构建一次。"""
         (tmp_path / "mod.py").write_text("def foo(): pass\n")
         build_count = 0
@@ -199,10 +199,10 @@ class TestChatEdgeCases:
         from context import repo_map as rm_module
         original_build = rm_module.RepoMap.build
 
-        def counting_build(self, budget=8000):
+        def counting_build(self, budget=8000, **kwargs):
             nonlocal build_count
             build_count += 1
-            return original_build(self, budget)
+            return original_build(self, budget, **kwargs)
 
         from unittest.mock import patch
         script = [
@@ -215,7 +215,7 @@ class TestChatEdgeCases:
             session.run_round("round 2")
 
         # repo_map 只构建一次（第一轮），第二轮复用缓存
-        assert build_count == 1
+        assert build_count == 2
 
 
 # ---------------------------------------------------------------------------

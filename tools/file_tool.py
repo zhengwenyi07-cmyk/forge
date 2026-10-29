@@ -11,7 +11,7 @@ tools/file_tool.py
 设计原则：
 - 支持双模式：本地直接 I/O（默认） / 容器 runtime.exec()（沙箱模式）
 - 沙箱模式下，文件读写通过 docker exec 在容器内完成，路径无需映射
-- 写入内容用 base64 编码传输，零 shell 逃逸风险
+- 脚本与参数通过 stdin 传输，不进入宿主机命令行
 """
 
 from __future__ import annotations
@@ -32,20 +32,22 @@ VIEW_WINDOW_LINES = 100
 MAX_VIEW_CHARS = 20_000
 
 
-def _python_command(script: str) -> str:
-    payload = base64.b64encode(script.encode("utf-8")).decode("ascii")
-    return f"python -c \"import base64; exec(base64.b64decode('{payload}'))\""
-
-
 def _file_operation(runtime, operation: str, params: dict) -> ToolResult:
     from tools import file_ops
     try:
+        params = dict(params)
+        if runtime is not None and operation in ("edit_file", "write_file"):
+            root = getattr(runtime, "_workdir", None)
+            if root is None and getattr(runtime, "repo_path", None):
+                root = Path(runtime.repo_path).resolve()
+            if root:
+                params["workspace_root"] = str(root)
         if runtime is None:
             return ToolResult(success=True, output=getattr(file_ops, operation)(**params))
         source = Path(file_ops.__file__).read_text(encoding="utf-8")
         payload = json.dumps(params, ensure_ascii=True)
         script = source + "\nimport json\nprint(" + operation + "(**json.loads(" + repr(payload) + ")))\n"
-        result = runtime.exec(_python_command(script), timeout=10)
+        result = runtime.exec_python(script, timeout=10)
         return ToolResult(success=result.success, output=result.stdout, error=result.stderr if not result.success else None)
     except (OSError, ValueError, TypeError) as exc:
         return ToolResult(success=False, output="", error=str(exc))
@@ -56,6 +58,8 @@ def _file_operation(runtime, operation: str, params: dict) -> ToolResult:
 # ===========================================================================
 
 class FileReadTool(BaseTool):
+    read_only = True
+
     """
     读取文件内容。超过 MAX_READ_LINES 行时截断并提示。
 
@@ -110,6 +114,8 @@ class FileReadTool(BaseTool):
 # ===========================================================================
 
 class FileViewTool(BaseTool):
+    read_only = True
+
     """
     分窗口查看文件，每次返回 VIEW_WINDOW_LINES 行。
 
@@ -121,8 +127,9 @@ class FileViewTool(BaseTool):
         runtime: 传 runtime 时走容器，None 则走本地直接 I/O
     """
 
-    def __init__(self, runtime: Runtime | None = None) -> None:
+    def __init__(self, runtime: Runtime | None = None, max_view_lines: int = 100) -> None:
         self._runtime = runtime
+        self._window = max(1, max_view_lines)
 
     @property
     def name(self) -> str:
@@ -157,11 +164,11 @@ class FileViewTool(BaseTool):
         start_line = params.get("start_line", 1)
         if type(start_line) is not int or start_line < 1:
             return ToolResult(success=False, output="", error="start_line must be an integer >= 1")
-        result = _file_operation(self._runtime, "read_window", {"path": path, "start_line": start_line, "window_size": VIEW_WINDOW_LINES})
+        result = _file_operation(self._runtime, "read_window", {"path": path, "start_line": start_line, "window_size": self._window})
         if not result.success:
             return result
         data = json.loads(result.output)
-        return _format_view(path, data["lines"], start_line, VIEW_WINDOW_LINES, data["total"])
+        return _format_view(path, data["lines"], start_line, self._window, data["total"])
 
 
 
@@ -313,9 +320,10 @@ class FileEditTool(BaseTool):
 
 
 class ApplyPatchTool(BaseTool):
-    def __init__(self, runtime: Runtime | None = None) -> None:
+    def __init__(self, runtime: Runtime | None = None, artifact_root=None) -> None:
         from tools.runtime import LocalRuntime
         self._runtime = runtime or LocalRuntime()
+        self._artifact_root = Path(artifact_root or "logs/artifacts").resolve()
 
     @property
     def name(self):
@@ -323,14 +331,36 @@ class ApplyPatchTool(BaseTool):
 
     @property
     def description(self):
-        return "Apply a standard unified git diff atomically after git apply --check. Paths are relative to the repository root."
+        return "Apply a unified git diff after git apply --check. Supply patch OR artifact_task_id to apply a durable child patch without retyping it. Paths are relative to the repository root; conflicts make no changes."
 
     @property
     def parameters_schema(self):
-        return {"type": "object", "properties": {"patch": {"type": "string", "minLength": 1}}, "required": ["patch"]}
+        return {"type": "object", "properties": {
+            "patch": {"type": "string", "minLength": 1},
+            "artifact_task_id": {"type": "string", "minLength": 1},
+        }, "additionalProperties": False}
 
     def execute(self, params):
-        encoded = base64.b64encode(params["patch"].encode("utf-8")).decode("ascii")
+        import hashlib
+        import re
+        if bool(params.get("patch")) == bool(params.get("artifact_task_id")):
+            return ToolResult(False, "", "Supply exactly one of patch or artifact_task_id")
+        patch = params.get("patch")
+        if patch is None:
+            task_id = params["artifact_task_id"]
+            if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", task_id):
+                return ToolResult(False, "", "Invalid artifact task id")
+            manifest = self._artifact_root / task_id / "result.json"
+            if not manifest.resolve().is_relative_to(self._artifact_root):
+                return ToolResult(False, "", "Artifact is outside the configured store")
+            try:
+                payload = json.loads(manifest.read_text(encoding="utf-8"))
+                patch = payload["result"]["patch"]
+                if not patch or hashlib.sha256(patch.encode("utf-8")).hexdigest() != payload["patch_sha256"]:
+                    return ToolResult(False, "", "Artifact patch checksum mismatch or empty patch")
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                return ToolResult(False, "", f"Cannot load child artifact: {exc}")
+        encoded = base64.b64encode(patch.encode("utf-8")).decode("ascii")
         script = (
             "import base64,subprocess,sys\n"
             f"patch=base64.b64decode('{encoded}')\n"
@@ -340,5 +370,5 @@ class ApplyPatchTool(BaseTool):
             "  sys.stderr.buffer.write(r.stderr); sys.exit(r.returncode)\n"
             "print('Patch applied successfully')\n"
         )
-        result = self._runtime.exec(_python_command(script), timeout=30)
+        result = self._runtime.exec_python(script, timeout=30)
         return ToolResult(success=result.success, output=result.stdout, error=result.stderr if not result.success else None)

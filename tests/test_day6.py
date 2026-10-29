@@ -102,10 +102,9 @@ agent:
         config = load_config(config_file)
         assert config.llm.api_key == "sk-from-env"
 
-    def test_missing_file_returns_defaults(self, tmp_path):
-        config = load_config(tmp_path / "nonexistent.yaml")
-        assert isinstance(config, AppConfig)
-        assert config.llm.provider == "anthropic"
+    def test_explicit_missing_file_raises(self, tmp_path):
+        with pytest.raises(FileNotFoundError):
+            load_config(tmp_path / "nonexistent.yaml")
 
     def test_none_path_returns_defaults(self, tmp_path, monkeypatch):
         # 确保当前目录没有 default.yaml

@@ -23,5 +23,6 @@ def test_cumulative_token_budget_stops_additional_calls(real_repo):
     with EventLog.create(task, log_dir=str(real_repo.parent / "logs")) as log:
         result = Agent(backend, ToolRegistry()).run(task, log)
     assert not result.is_success()
-    assert result.steps_taken == 1
+    assert result.steps_taken == 0
+    assert backend.call_count == 0
     assert "token budget" in result.summary

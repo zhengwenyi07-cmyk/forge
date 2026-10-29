@@ -42,6 +42,7 @@ from agent.event_log import EventLog
 from context.history import ConversationHistory
 # RepoMap：tree-sitter 仓库地图，注入 system prompt 提供全局代码结构
 from context.repo_map import RepoMap
+from agent.run_context import BudgetExceeded
 # TokenBudget：按优先级分配各部分的 token 配额，超出时裁剪
 from context.token_budget import TokenBudget
 # Prompt 模板函数：
@@ -91,8 +92,13 @@ class AgentConfig:
     # 触发 Reflection 的工具名列表（这些工具返回 error 时注入反思 prompt）
     test_tool_names: tuple[str, ...] = ("test", "pytest")
     # ── 预算与历史 ─────────────────────────────────────────────────────
-    # 总 token 预算（传递给 TokenBudget，含 15% 安全预留）
+    # 整次运行的累计 token 上限；context_window 单独约束每次请求
     budget_tokens: int = 80_000
+    context_window: int = 32_768
+    max_output_tokens: int = 8192
+    repo_map_budget: int = 4000
+    repo_map_strategy: str = "personalized"
+    budget_ledger: object = None
     # 历史最大消息条数（第一层裁剪：ConversationHistory 滑动窗口）
     history_max_messages: int = 40
     # ── 重试 ────────────────────────────────────────────────────────────
@@ -155,6 +161,7 @@ class Agent:
         self._backend = backend
         # 工具注册表（注册了 12 个 BaseTool 子类实例）
         self._registry = registry
+        self._base_registry = registry
         # 多 Agent 任务注册中心（None = 单 Agent 模式，向后兼容）
         self._task_registry = task_registry
         self._runtime = runtime
@@ -168,6 +175,53 @@ class Agent:
     # ==================================================================
 
     def run(self, task: Task, log: EventLog) -> RunResult:
+        from agent.run_context import BudgetLedger, RunContext
+        self._registry = self._base_registry.for_task(task.task_type)
+        ledger = self._cfg.budget_ledger or BudgetLedger(task.budget_tokens)
+        self.context = RunContext(task.task_id, task.repo_path, task.task_type, ledger)
+        self._base_commit = None
+        self._patch_error = None
+        if "task" in self._registry and hasattr(self._registry.tools["task"], "set_run_context"):
+            self._registry.tools["task"].set_run_context(self.context, self._cfg)
+        try:
+            result = self._run(task, log)
+        except KeyboardInterrupt:
+            result = RunResult(task.task_id, RunStatus.GAVE_UP, "Interrupted by user; partial artifacts preserved.", len(log.get_actions()))
+            log.log_task_failed(steps=result.steps_taken, reason=result.summary)
+        except Exception as exc:
+            logger.exception("Run failed; preserving workspace evidence")
+            result = RunResult(task.task_id, RunStatus.FAILED, str(exc), 0, error=str(exc))
+        if self._cfg.budget_ledger is None:
+            ledger.close()
+            if self._task_registry is not None:
+                try:
+                    self._task_registry.shutdown()
+                    self._check_child_completions(ConversationHistory(), log)
+                except Exception as exc:
+                    result.artifact_error = f"Child shutdown/finalization failed: {exc}"
+            result.usage_complete = ledger.snapshot()["pending_requests"] == 0
+            if not result.usage_complete:
+                result.summary += "\nUsage is provisional: model requests are still settling in child agents."
+        result.base_commit = getattr(self, "_base_commit", None)
+        self.context.base_commit = result.base_commit
+        if task.task_type == "modify":
+            result.patch = result.patch or self._get_git_diff(task.repo_path)
+        result.validation = list(self.context.validation)
+        result.own_tokens = ledger.usage_for(task.task_id)
+        result.total_tokens = result.own_tokens if self._cfg.budget_ledger else ledger.total
+        if result.validation:
+            result.validation_status = result.validation[-1].get("status") or ("passed" if result.validation[-1]["success"] else "failed")
+        if task.task_type == "modify" and self._patch_error:
+            result.artifact_error = self._patch_error
+        if task.task_type == "read_only":
+            result.patch = None
+        try:
+            self.context.save(result, log.path)
+        except (OSError, ValueError, RuntimeError) as exc:
+            result.artifact_error = str(exc)
+        return result
+
+    def _run(self, task: Task, log: EventLog) -> RunResult:
         """
         执行一次完整的 agent 运行（ReAct 主循环）。
 
@@ -183,18 +237,20 @@ class Agent:
         # 和 _get_git_diff（相对任务开始时的固定提交）使用
         self._current_repo_path = task.repo_path
         self._current_task_type = task.task_type
+        self._current_task_description = task.description
         from pathlib import Path
         self._patch_excludes = []
         try:
             log_path = Path(log.path).resolve()
             log_relative = log_path.relative_to(Path(task.repo_path).resolve())
             self._patch_excludes = [log_relative.parent.as_posix() if log_relative.parent != Path(".") else log_relative.as_posix()]
+            self._patch_excludes.append((log_relative.parent / "artifacts").as_posix())
         except ValueError:
             pass
         self._base_commit = self._resolve_base_commit(task.repo_path)
         initial_patch = self._get_git_diff(task.repo_path) if task.task_type == "modify" else None
         tested_patch = None
-        test_attempts = []
+        test_attempts = self.context.validation
         # 按 repo_path 隔离 repo_map 缓存，换 repo 时自动重建。
         # _repo_map_cache_key 与当前 task.repo_path 比较，
         # 不一致时删除缓存，下次 _build_messages 时重新构建。
@@ -218,12 +274,18 @@ class Agent:
                 role="user",
                 content=build_task_prompt(task.description, self._runtime._workdir if self._runtime and self._runtime.name.startswith("docker") else task.repo_path, task.issue_url),
             ))
-        # TokenBudget：从总预算算出各部分配额（default_plan()），
-        # 在 _build_messages 中用 trim_history() 做 Token 维度的第二层裁剪
-        token_budget = TokenBudget(total=self._cfg.budget_tokens)
+        # 单次上下文窗口只负责消息裁剪；累计开销由共享 ledger 处理。
+        token_budget = TokenBudget(total=self._cfg.context_window)
         # RepoMap：扫描 repo 提取符号，生成摘要字符串。
-        # 实际 build(budget) 在 _build_messages() 中仅在第一步执行，后续复用缓存
-        repo_map = RepoMap(task.repo_path)
+        # 文件内容、任务、近期路径或预算改变时更新选择。
+        if not hasattr(self, "_repo_map") or str(self._repo_map._root) != str(Path(task.repo_path).resolve()):
+            self._repo_map = RepoMap(task.repo_path)
+        repo_map = self._repo_map
+        repo_map.index.excluded_paths = set(self._patch_excludes)
+        for name in ("find_symbol", "find_files", "search_text"):
+            tool = self._registry.tools.get(name)
+            if tool is not None:
+                tool._repo_index = repo_map.index
 
         # ── ReAct 主循环计数器 ──────────────────────────────────────
         # 总 token 消耗（累加每次 LLMResponse.total_tokens）
@@ -238,7 +300,7 @@ class Agent:
         # ═══════════════════════════════════════════════════════════════════
         for step in range(1, task.max_steps + 1):
             logger.debug("Step %d/%d", step, task.max_steps)
-            if total_tokens >= task.budget_tokens:
+            if self.context.ledger.total >= self.context.ledger.limit or total_tokens >= task.budget_tokens:
                 reason = f"Run token budget exhausted ({task.budget_tokens})"
                 log.log_task_failed(steps=step - 1, reason=reason)
                 return RunResult(task.task_id, RunStatus.GAVE_UP, reason, step - 1, total_tokens)
@@ -286,6 +348,9 @@ class Agent:
             # ── 阶段 2：LLM 推理（带重试） ──────────────────────────
             try:
                 response = self._call_with_retry(messages, tools)
+            except BudgetExceeded as exc:
+                log.log_task_failed(steps=step - 1, reason=str(exc))
+                return RunResult(task.task_id, RunStatus.GAVE_UP, str(exc), step - 1)
             except Exception as exc:
                 logger.error("LLM call failed at step %d after retries: %s", step, exc)
                 log.log_task_failed(steps=step, reason=f"LLM error: {exc}")
@@ -300,6 +365,10 @@ class Agent:
 
             total_tokens += response.total_tokens
             action = response.action
+            if self._cfg.stop_check and self._cfg.stop_check():
+                reason = "Stop signal received during model request; returned action was not executed."
+                log.log_task_failed(steps=step, reason=reason)
+                return RunResult(task.task_id, RunStatus.GAVE_UP, reason, step, total_tokens)
 
             # ── 阶段 2b：Action 写入 EventLog ───────────────────────
             # 记录 LLM 的完整原文（raw_content：含 thought + tool_call/message）
@@ -354,7 +423,7 @@ class Agent:
                         if result.test_attempted:
                             patch = self._get_git_diff(task.repo_path)
                             tested_patch = patch if patch == before_test else None
-                            test_attempts.append({"command": task.test_cmd, "success": result.success, "output": result.output, "error": result.error})
+                            test_attempts.append({"command": task.test_cmd, "success": result.success, "status": result.validation_status, "output": result.output, "error": result.error})
                             if not patch or patch == initial_patch:
                                 blockers.append("The test changed or removed the task diff; review the changes and validate again.")
                     if not test_attempts or tested_patch != patch:
@@ -403,11 +472,12 @@ class Agent:
                 # 工具不存在时返回 error ToolResult（不抛异常），Agent 继续运行。
                 # ToolResult → Observation：包装为 Agent 标准格式
                 result = self._registry.execute_tool(tc.name, tc.params)
+                self.context.observe(tc.name, tc.params, result, step)
                 observation = result.to_observation(tc.name)
                 if tc.name == "test" and result.test_attempted and (tc.params.get("path") or tc.params.get("command")):
                     after_test = self._get_git_diff(task.repo_path)
                     tested_patch = after_test if after_test == before_test else None
-                    test_attempts.append({"params": tc.params, "success": result.success, "output": result.output, "error": result.error})
+                    test_attempts.append({"params": tc.params, "success": result.success, "status": result.validation_status, "output": result.output, "error": result.error})
 
                 # 追踪文件编辑步数：
                 # file_write/file_edit/edit → 重置计数器
@@ -424,14 +494,7 @@ class Agent:
                 # Action 格式化为 assistant 消息（thought + tool_call params）
                 # Observation 格式化为 user 消息（tool name + status + output）
                 # 下一轮 LLM 调用时看到 history：上一步的 (Action, Observation) 对
-                history.add(LLMMessage(
-                    role="assistant",
-                    content=self._format_action_for_history(action),
-                ))
-                history.add(LLMMessage(
-                    role="user",
-                    content=self._format_observation_for_history(observation),
-                ))
+                self._append_tool_history(history, action, observation)
 
                 # ── 环节 D：Reflection 自省判断 ────────────────────
                 # 对应 resume "双重 Reflection 自省机制"。
@@ -454,7 +517,7 @@ class Agent:
 
                 # 触发条件 B：连续 N 步无编辑 → 注入 REFLECTION_NO_EDIT
                 # 防止无尽探索：追问"有足够上下文了吗？有→动手改；没有→精确说出缺什么"
-                elif steps_without_edit >= self._cfg.reflection_no_edit_steps:
+                elif task.task_type == "modify" and self.context.phase in ("edit", "verify") and steps_without_edit >= self._cfg.reflection_no_edit_steps:
                     reflect_prompt = reflection_no_edit(steps_without_edit)
                     log.log_reflection(
                         step=step,
@@ -517,6 +580,10 @@ class Agent:
             return 0
 
         for notif in notifications:
+            self.context.ledger.reconcile(notif.task_id, notif.total_tokens)
+            self.context.child_results[notif.task_id] = {"task_id": notif.task_id, "status": notif.status.value,
+                "base_commit": notif.base_commit, "artifact_path": notif.artifact_path, "summary": notif.summary[:500],
+                "artifact_error": notif.artifact_error, "recovery_worktree": notif.recovery_worktree}
             status_icon = "SUCCESS" if notif.status.value == "completed" else "FAILED"
             notification_text = (
                 f"[SUB-AGENT NOTIFICATION]\n"
@@ -524,8 +591,9 @@ class Agent:
                 f"Type: {notif.agent_type.value}\n"
                 f"Status: {status_icon}\n"
                 f"Steps: {notif.steps_taken} | Tokens: {notif.total_tokens}\n"
-                f"Summary: {notif.summary}\n"
-                + (f"Child patch (review and apply with apply_patch):\n{notif.patch}\n" if notif.patch else "")
+                f"Summary: {notif.summary}\nBase: {notif.base_commit}\nArtifacts: {notif.artifact_path}\n"
+                f"Artifact error: {notif.artifact_error}\nRecovery worktree: {notif.recovery_worktree}\n"
+                + (f"Child patch preview (review validation; apply_patch artifact_task_id={notif.task_id}):\n{notif.patch[:8000]}\n" if notif.patch else "")
             )
             history.add(LLMMessage(role="user", content=notification_text))
             logger.info(
@@ -568,12 +636,17 @@ class Agent:
         """
         schemas = self._registry.get_schemas()
 
-        # 生成 repo-map（带缓存：只在第一步生成，之后复用）。
-        # 缓存策略：同一次 run() 内只构建一次，跨 repo 切换自动失效。
-        if not hasattr(self, "_repo_map_cache"):
+        # 缓存选择依赖索引版本、任务、近期路径、预算及算法。
+        paths = self.context.relevant_paths if hasattr(self, "context") else []
+        task_description = getattr(self, "_current_task_description", "")
+        map_budget = min(self._cfg.repo_map_budget, self._cfg.context_window // 4)
+        selection_key = repo_map.cache_key(task_description, paths, map_budget, self._cfg.repo_map_strategy)
+        if not hasattr(self, "_repo_map_cache") or selection_key != getattr(self, "_repo_map_selection_key", None):
             self._repo_map_cache = repo_map.build(
-                budget=token_budget.default_plan().repo_map
+                budget=map_budget, task=task_description, mentioned_paths=paths,
+                strategy=self._cfg.repo_map_strategy,
             )
+            self._repo_map_selection_key = selection_key
 
         # 渲染 system prompt：将 repo-map 摘要注入 {repo_summary} 占位符
         system_content = build_system_prompt(
@@ -591,16 +664,35 @@ class Agent:
 
         # 第二层裁剪（Token 维度）：从最新到最旧贪婪选择，保留首条，丢弃插入提示。
         # 第一层已由 ConversationHistory 滑动窗口完成（条数维度）。
-        trimmed_history_dicts = token_budget.trim_history(
-            history.to_dicts(),
-            token_budget.default_plan().history,
-        )
+        from context.token_budget import estimate_tokens
+        memory = self.context.memory() if hasattr(self, "context") else ""
+        output_limit = getattr(self._backend, "_max_tokens", self._cfg.max_output_tokens)
+        fixed_cost = estimate_tokens(system_content) + estimate_tokens(memory) + estimate_tokens(json.dumps([vars(s) for s in schemas])) + output_limit + 512
+        history_limit = self._cfg.context_window - fixed_cost
+        if history_limit < 128:
+            raise ValueError("Context window is too small for instructions, tool schemas and output reserve; lower repo_map_budget/max_tokens or increase context_window")
+        trimmed_history_dicts = token_budget.trim_history(history.to_dicts(), history_limit)
 
         # 组装完整 messages：system 放在第 0 位（永不裁剪）→ 裁剪后的 history
         messages = [LLMMessage(role="system", content=system_content)]
         for d in trimmed_history_dicts:
-            messages.append(LLMMessage(role=d["role"], content=d["content"]))
+            messages.append(LLMMessage(**d))
+        if memory:
+            messages.append(LLMMessage(role="user", content=memory))
         return messages
+
+    def _append_tool_history(self, history, action, observation):
+        if self._backend.supports_function_calling:
+            call = action.tool_call
+            history.add_many([
+                LLMMessage(role="assistant", content=action.thought or "", tool_calls=[{
+                    "id": call.id, "type": "function", "function": {"name": call.name,
+                    "arguments": json.dumps(call.params, ensure_ascii=False)}}]),
+                LLMMessage(role="tool", content=self._format_observation_for_history(observation), tool_call_id=call.id),
+            ])
+        else:
+            history.add_many([LLMMessage(role="assistant", content=self._format_action_for_history(action)),
+                              LLMMessage(role="user", content=self._format_observation_for_history(observation))])
 
     def _format_action_for_history(self, action: Action) -> str:
         """
@@ -668,52 +760,55 @@ class Agent:
         stream=False → 走 backend.complete()（一次性返回）
         不重试：401/403（认证失败）、400（参数错误）——这些重试也没用。
         """
-        import time as _time
-
-        last_exc: Exception | None = None
+        import time
+        from context.token_budget import estimate_tokens
+        ledger = self.context.ledger if hasattr(self, "context") else None
+        estimated = estimate_tokens(json.dumps([m.to_dict() for m in messages], ensure_ascii=False)) + estimate_tokens(json.dumps([vars(t) for t in tools]))
+        output_limit = getattr(self._backend, "_max_tokens", self._cfg.max_output_tokens)
+        if hasattr(self._backend, "_input_tokens"):
+            estimated = self._backend._input_tokens
+            output_limit = self._backend._output_tokens
         delay = self._cfg.llm_retry_delay
-
         for attempt in range(1, self._cfg.llm_max_retries + 1):
+            if self._cfg.stop_check and self._cfg.stop_check():
+                raise BudgetExceeded("Run cancelled before model request")
+            reservation = ledger.reserve(self.context.task_id, estimated + output_limit) if ledger else None
             try:
                 if self._cfg.stream:
-                    cb = self._cfg.stream_callback
-                    thought_cb = self._cfg.thought_callback
-                    if hasattr(self._backend, "stream"):
-                        return self._backend.stream(
-                            messages, tools,
-                            on_text=cb,
-                            on_thought=thought_cb,
-                        )
-                return self._backend.complete(messages, tools)
+                    response = self._backend.stream(messages, tools, on_text=self._cfg.stream_callback,
+                                                    on_thought=self._cfg.thought_callback)
+                else:
+                    response = self._backend.complete(messages, tools)
+                if ledger:
+                    ledger.settle(reservation, self.context.task_id, response.total_tokens)
+                return response
+            except BudgetExceeded:
+                raise
             except Exception as exc:
-                last_exc = exc
-                exc_str = str(exc).lower()
-                # 认证/参数错误不重试，立即抛出（让上层快速失败）
-                if any(kw in exc_str for kw in (
-                    "401", "403", "invalid api key", "authentication",
-                    "400", "bad request",
-                )):
+                if attempt == self._cfg.llm_max_retries or any(k in str(exc).lower() for k in ("401", "403", "authentication", "invalid api key", "400", "bad request")):
                     raise
-                # 网络/超时/服务端错误 → 指数退避重试
-                if attempt < self._cfg.llm_max_retries:
-                    logger.warning(
-                        "LLM call failed (attempt %d/%d): %s — retrying in %.1fs",
-                        attempt, self._cfg.llm_max_retries, exc, delay,
-                    )
-                    _time.sleep(delay)
-                    delay *= 2
-
-        raise last_exc  # type: ignore[misc]
+                logger.warning("LLM request failed; retry %s: %s", attempt, exc)
+                if not self._cfg.stop_check:
+                    time.sleep(delay)
+                else:
+                    deadline = time.monotonic() + delay
+                    while time.monotonic() < deadline:
+                        if self._cfg.stop_check():
+                            raise BudgetExceeded("Run cancelled during retry")
+                        time.sleep(min(0.1, max(0, deadline - time.monotonic())))
+                delay *= 2
+            finally:
+                if ledger:
+                    ledger.release(reservation)
 
     def _resolve_base_commit(self, repo_path: str) -> str | None:
         from tools import workspace
-        from tools.file_tool import _python_command
         from pathlib import Path
         try:
             if self._runtime is None:
                 return workspace.resolve_head(repo_path)
             script = Path(workspace.__file__).read_text(encoding="utf-8") + "\nprint(resolve_head())\n"
-            result = self._runtime.exec(_python_command(script), cwd=repo_path, timeout=10)
+            result = self._runtime.exec_python(script, cwd=repo_path, timeout=10)
             return result.stdout.strip() if result.success else None
         except (OSError, RuntimeError, subprocess.SubprocessError):
             return None
@@ -726,16 +821,20 @@ class Agent:
         """
         from pathlib import Path
         from tools import workspace
-        from tools.file_tool import _python_command
         try:
             if self._runtime is None:
                 diff = workspace.capture_patch(repo_path, getattr(self, "_patch_excludes", []), getattr(self, "_base_commit", None) or "HEAD")
             else:
-                script = Path(workspace.__file__).read_text(encoding="utf-8") + f"\nprint(capture_patch(exclude_paths={getattr(self, '_patch_excludes', [])!r}, base_ref={getattr(self, '_base_commit', None) or 'HEAD'!r}), end='')\n"
-                result = self._runtime.exec(_python_command(script), cwd=repo_path, timeout=30)
+                # JSON escapes CR/LF inside hunks so host text-mode pipes cannot
+                # translate CRLF into CRCRLF and corrupt the durable patch.
+                script = Path(workspace.__file__).read_text(encoding="utf-8") + f"\nimport json\nprint(json.dumps(capture_patch(exclude_paths={getattr(self, '_patch_excludes', [])!r}, base_ref={getattr(self, '_base_commit', None) or 'HEAD'!r}), ensure_ascii=True))\n"
+                result = self._runtime.exec_python(script, cwd=repo_path, timeout=30)
                 if not result.success:
+                    self._patch_error = result.stderr or "Could not capture workspace patch"
                     return None
-                diff = result.stdout
+                diff = json.loads(result.stdout)
+            self._patch_error = None
             return diff or None
-        except Exception:
+        except Exception as exc:
+            self._patch_error = str(exc)
             return None

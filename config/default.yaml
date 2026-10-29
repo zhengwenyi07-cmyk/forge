@@ -7,10 +7,12 @@ llm:
   max_tokens: 8192
 agent:
   max_steps: 40
-  budget_tokens: 80000
+  run_token_limit: 80000
   log_dir: ./logs
 context:
-  repo_map_budget: 8000
+  context_window: 32768
+  repo_map_budget: 4000
+  repo_map_strategy: personalized
   history_window: 20
 runtime:
   image: forge-runtime:py311

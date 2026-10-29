@@ -13,6 +13,9 @@ def search(operation, params):
     if not root.exists():
         raise ValueError(f"Path not found: {root}")
     def iter_files():
+        if "_files" in params:
+            yield from (Path(path) for path in params["_files"])
+            return
         if root.is_file():
             yield root
             return

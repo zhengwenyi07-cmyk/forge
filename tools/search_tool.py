@@ -4,17 +4,17 @@ tools/search_tool.py
 代码搜索工具，三个 action：
 - search_text:   在文件内容中搜索字符串（grep 风格）
 - find_files:    按文件名 pattern 查找文件
-- find_symbol:   在 Python 文件中查找函数/类定义（不依赖 tree-sitter，用正则）
+- find_symbol:   使用共享 RepoIndex 查找限定名称和签名；独立使用时保留兼容回退
 
 设计原则：
 - 本地模式（无 runtime）：直接用 Python 遍历文件系统
-- 容器模式（有 runtime）：搜索脚本经 base64 编码后在容器内执行，零 shell 逃逸
+- 容器模式（有 runtime）：搜索脚本经 stdin 在容器内执行
 - 结果数量上限防止返回太多内容爆上下文
 """
 
 from __future__ import annotations
 
-import base64
+import fnmatch
 import json
 import re
 from pathlib import Path
@@ -26,6 +26,23 @@ from tools.runtime import Runtime
 
 MAX_RESULTS = 50        # 单次搜索最多返回的结果数
 MAX_LINE_LENGTH = 200   # 单行超长时截断显示
+
+
+def _index_scope(tool, search_path):
+    index = tool._repo_index
+    workdir = getattr(tool._runtime, "_workdir", None)
+    normalized = search_path.replace("\\", "/")
+    if workdir and (normalized == workdir or normalized.startswith(workdir + "/")):
+        normalized = normalized[len(workdir):].lstrip("/") or "."
+    target = (index.root / normalized).resolve()
+    if not target.is_relative_to(index.root):
+        raise ValueError("Search path must stay inside the task repository")
+    if not target.exists():
+        raise ValueError(f"Path not found: {search_path}")
+    scope = target.relative_to(index.root).as_posix()
+    index.refresh()
+    return [(path, record) for path, record in sorted(index.files.items())
+            if scope == "." or path == scope or path.startswith(scope + "/")]
 
 # 搜索时跳过的目录
 _SKIP_DIRS: frozenset[str] = frozenset({
@@ -58,6 +75,8 @@ def _iter_files(root: Path, glob_pattern: str):
 # ===========================================================================
 
 class SearchTextTool(BaseTool):
+    read_only = True
+
     """
     在 repo 文件中搜索文本，返回匹配行及其上下文。
 
@@ -117,6 +136,20 @@ class SearchTextTool(BaseTool):
         file_pattern = params.get("file_pattern", "*")
         case_sensitive = params.get("case_sensitive", True)
 
+        if hasattr(self, "_repo_index"):
+            try:
+                files = [p for p, _ in _index_scope(self, search_path)]
+                args = {"pattern": raw_pattern, "path": search_path, "file_pattern": file_pattern,
+                        "case_sensitive": case_sensitive, "_files": files}
+                if self._runtime:
+                    return _runtime_search(self._runtime, "search_text", args)
+                from tools.search_ops import search
+                args["_files"] = [str(self._repo_index.root / p) for p in files]
+                args["path"] = str(self._repo_index.root)
+                return ToolResult(True, search("search_text", args))
+            except (OSError, ValueError) as exc:
+                return ToolResult(False, "", str(exc))
+
         if self._runtime:
             return self._execute_via_runtime(
                 raw_pattern, search_path, file_pattern, case_sensitive,
@@ -168,6 +201,8 @@ class SearchTextTool(BaseTool):
 # ===========================================================================
 
 class FindFilesTool(BaseTool):
+    read_only = True
+
     """
     按文件名 pattern 查找文件。
 
@@ -215,6 +250,14 @@ class FindFilesTool(BaseTool):
         pattern = params.get("pattern", "")
         search_path = params.get("path", ".")
 
+        if hasattr(self, "_repo_index"):
+            try:
+                matches = [p for p, _ in _index_scope(self, search_path)
+                           if fnmatch.fnmatch(Path(p).name, pattern) or Path(p).match(pattern)]
+                return ToolResult(True, "\n".join(matches[:MAX_RESULTS]) or f"No files found matching '{pattern}'")
+            except (OSError, ValueError) as exc:
+                return ToolResult(False, "", str(exc))
+
         if self._runtime:
             return self._execute_via_runtime(pattern, search_path)
         return self._execute_local(pattern, search_path)
@@ -251,6 +294,8 @@ class FindFilesTool(BaseTool):
 # ===========================================================================
 
 class FindSymbolTool(BaseTool):
+    read_only = True
+
     """
     在 Python 文件中查找函数/类定义。
     用正则匹配 def / class 语句，Day 5 可替换为 tree-sitter 精确实现。
@@ -273,8 +318,8 @@ class FindSymbolTool(BaseTool):
     @property
     def description(self) -> str:
         return (
-            "Find function or class definitions in Python files. "
-            "Searches for 'def symbol' or 'class symbol' patterns. "
+            "Find function, class and method definitions, including qualified names such as Agent.run. "
+            "Uses the shared repository index during agent runs; returns paths, line numbers and signatures. "
             "Supports partial name matching."
         )
 
@@ -301,6 +346,15 @@ class FindSymbolTool(BaseTool):
 
         if not symbol:
             return ToolResult(success=False, output="", error="symbol is required")
+
+        if hasattr(self, "_repo_index"):
+            try:
+                matches = [f"{path}:{definition.line}: {definition.signature} ({definition.kind})"
+                           for path, record in _index_scope(self, search_path) for definition in record.definitions
+                           if symbol in definition.qualified_name]
+                return ToolResult(True, "\n".join(matches[:MAX_RESULTS]) or f"No definition found for '{symbol}'")
+            except (OSError, ValueError) as exc:
+                return ToolResult(False, "", str(exc))
 
         if self._runtime:
             return self._execute_via_runtime(symbol, search_path)
@@ -360,15 +414,9 @@ def _format_search_results(matches: list[str], raw_pattern: str = "") -> ToolRes
     return ToolResult(success=True, output="\n".join(matches) + suffix)
 
 
-def _b64_script(python_code: str) -> str:
-    """将 Python 脚本编码为 base64（供容器内 exec 调用）。"""
-    return base64.b64encode(python_code.encode()).decode()
-
-
 def _runtime_search(runtime, operation, params):
     from tools import search_ops
-    from tools.file_tool import _python_command
     source = Path(search_ops.__file__).read_text(encoding="utf-8")
     script = source + "\nimport json\nprint(search(" + repr(operation) + ", json.loads(" + repr(json.dumps(params)) + ")))\n"
-    result = runtime.exec(_python_command(script), timeout=30)
+    result = runtime.exec_python(script, timeout=30)
     return ToolResult(success=result.success, output=result.stdout, error=result.stderr if not result.success else None)

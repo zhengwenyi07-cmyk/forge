@@ -163,14 +163,28 @@ def _run_git(args: list[str], cwd: str) -> tuple[bool, str]:
         output  = stdout + stderr 合并
     """
     try:
+        environment = os.environ.copy()
+        token = environment.get("GITHUB_TOKEN", "")
+        if token and args[0] in ("clone", "push", "fetch"):
+            import base64
+            encoded = base64.b64encode(("x-access-token:" + token).encode()).decode()
+            count = int(environment.get("GIT_CONFIG_COUNT", "0"))
+            environment.update({"GIT_CONFIG_COUNT": str(count + 1),
+                                f"GIT_CONFIG_KEY_{count}": "http.https://github.com/.extraheader",
+                                f"GIT_CONFIG_VALUE_{count}": "AUTHORIZATION: basic " + encoded})
         proc = subprocess.run(
             ["git"] + args,
             capture_output=True,
             encoding="utf-8", errors="replace",
             timeout=60,
             cwd=cwd,
+            env=environment,
         )
         output = (proc.stdout + proc.stderr).strip()
+        if token:
+            output = output.replace(token, "[REDACTED]")
+            if args[0] in ("clone", "push", "fetch"):
+                output = output.replace(encoded, "[REDACTED]")
         return proc.returncode == 0, output
     except Exception as e:
         return False, str(e)
@@ -195,14 +209,12 @@ def clone_repo(repo_name: str, local_path: str) -> None:
         logger.info("Repo already exists at %s, skipping clone", local_path)
         return
 
-    token = os.environ.get("GITHUB_TOKEN", "")
-    if token:
-        url = f"https://{token}@github.com/{repo_name}.git"
-    else:
-        url = f"https://github.com/{repo_name}.git"
+    url = f"https://github.com/{repo_name}.git"
 
     click.echo(f"Cloning {repo_name} → {local_path} ...")
-    ok, out = _run_git(["clone", url, local_path], cwd="/tmp")
+    path = path.resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    ok, out = _run_git(["clone", url, str(path)], cwd=str(path.parent))
     if not ok:
         raise RuntimeError(f"git clone failed: {out}")
 
@@ -217,7 +229,9 @@ def create_branch(local_path: str, branch: str) -> None:
     ok, out = _run_git(["checkout", "-b", branch], cwd=local_path)
     if not ok:
         # 分支已存在，切换过去
-        _run_git(["checkout", branch], cwd=local_path)
+        ok, out = _run_git(["checkout", branch], cwd=local_path)
+        if not ok:
+            raise RuntimeError(f"Could not switch to task branch: {out}")
 
 
 def push_branch(local_path: str, branch: str) -> None:
@@ -301,7 +315,15 @@ def run_on_issue(
     # 分支名：agent/fix-issue-{issue_number}-{unix_timestamp}
     # 时间戳确保分支名全局唯一，不与已有分支冲突。
     branch = f"agent/fix-issue-{issue_number}-{int(time.time())}"
-    create_branch(local_path, branch)
+    ok, status = _run_git(["status", "--porcelain", "--untracked-files=normal"], cwd=local_path)
+    if not ok or status.strip():
+        click.echo("Refusing to reuse a dirty or invalid checkout. Use a clean clone/worktree for issue automation.", err=True)
+        return 1
+    try:
+        create_branch(local_path, branch)
+    except RuntimeError as exc:
+        click.echo(str(exc), err=True)
+        return 1
     click.echo(f"  Branch: {branch}")
 
     # ── 步骤 4：构建 Agent ────────────────────────────────────────────
@@ -331,6 +353,10 @@ def run_on_issue(
     agent_config = AgentConfig(
         max_steps=config.agent.max_steps,
         budget_tokens=config.agent.budget_tokens,
+        context_window=config.context.context_window,
+        repo_map_budget=config.context.repo_map_budget,
+        max_output_tokens=config.llm.max_tokens,
+        repo_map_strategy=config.context.repo_map_strategy,
     )
     agent = Agent(backend, registry, agent_config, runtime=runtime)
 

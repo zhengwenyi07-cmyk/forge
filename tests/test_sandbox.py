@@ -30,9 +30,16 @@ from tools.git_tool import GitStatusTool
 # 辅助
 # ---------------------------------------------------------------------------
 
-DOCKER_AVAILABLE = shutil.which("docker") is not None and (
-    subprocess.run(["docker", "info"], capture_output=True, timeout=5).returncode == 0
-)
+def _docker_available():
+    if shutil.which("docker") is None:
+        return False
+    try:
+        return subprocess.run(["docker", "info"], capture_output=True, timeout=5).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+DOCKER_AVAILABLE = _docker_available()
 
 
 # ===========================================================================
@@ -159,9 +166,9 @@ class TestTestToolWithRuntime:
         # 用真实的 LocalRuntime，但通过 tmp_path 验证 cwd 传递
         calls = []
         class RecordingRuntime(LocalRuntime):
-            def exec(self, cmd, cwd=None, timeout=30):
-                calls.append({"cmd": cmd, "cwd": cwd})
-                return super().exec(cmd, cwd=cwd, timeout=timeout)
+            def exec_argv(self, argv, cwd=None, timeout=30, stdin=None):
+                calls.append({"cmd": " ".join(argv), "cwd": cwd})
+                return super().exec_argv(argv, cwd=cwd, timeout=timeout, stdin=stdin)
 
         tests_dir = tmp_path / "tests"
         tests_dir.mkdir()
@@ -185,9 +192,9 @@ class TestGitToolWithRuntime:
     def test_custom_runtime_called(self):
         calls = []
         class RecordingRuntime(LocalRuntime):
-            def exec(self, cmd, cwd=None, timeout=30):
-                calls.append(cmd)
-                return super().exec(cmd, cwd=cwd, timeout=timeout)
+            def exec_argv(self, argv, cwd=None, timeout=30, stdin=None):
+                calls.append(" ".join(argv))
+                return super().exec_argv(argv, cwd=cwd, timeout=timeout, stdin=stdin)
 
         tool = GitStatusTool(runtime=RecordingRuntime())
         tool.execute({})

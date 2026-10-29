@@ -56,13 +56,13 @@ class ConversationHistory:
 
     def to_dicts(self) -> list[dict]:
         """转为 dict 列表，供 TokenBudget.trim_history() 使用。"""
-        return [{"role": m.role, "content": m.content} for m in self._messages]
+        return [m.to_dict() for m in self._messages]
 
     @classmethod
     def from_dicts(cls, dicts: list[dict], max_messages: int = 40) -> "ConversationHistory":
         """从 dict 列表恢复（断点续跑时用）。"""
         h = cls(max_messages=max_messages)
-        h._messages = [LLMMessage(role=d["role"], content=d["content"]) for d in dicts]
+        h._messages = [LLMMessage(**d) for d in dicts]
         return h
 
     @property
@@ -84,6 +84,8 @@ class ConversationHistory:
             # 保留 index 0（任务描述），从 index 1 开始丢
             if len(self._messages) > 1:
                 self._messages.pop(1)
+                while len(self._messages) > 1 and self._messages[1].tool_call_id:
+                    self._messages.pop(1)
             else:
                 break
 

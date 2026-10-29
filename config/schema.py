@@ -71,7 +71,7 @@ class AgentCfg:
     对应 config/default.yaml 的 agent 节。
     """
     max_steps: int = 40         # 单轮运行最大步数，超出熔断
-    budget_tokens: int = 80_000 # 总 token 预算（含 15% 预留），传给 TokenBudget
+    budget_tokens: int = 80_000 # 整次运行累计输入/输出上限；接受 run_token_limit 配置名
     log_dir: str = "./logs"     # EventLog JSONL 文件输出目录
 
 
@@ -107,8 +107,10 @@ class ContextConfig:
     上下文管理配置。
     对应 config/default.yaml 的 context 节。
     """
-    repo_map_budget: int = 8_000   # repo-map 的最大 token 预算，传给 RepoMap.build(budget=...)
+    repo_map_budget: int = 4_000   # 单次请求中 repo-map 的最大估算 token 数
     history_window: int = 20       # 保留最近 N 轮对话历史（条数维度，传给 ConversationHistory）
+    context_window: int = 32_768
+    repo_map_strategy: str = "personalized"
 
 
 @dataclass
@@ -201,7 +203,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
 
     config_path = Path(path)
     if not config_path.exists():
-        return AppConfig()
+        raise FileNotFoundError(f"Configuration file does not exist: {config_path}")
     raw = config_path.read_text(encoding="utf-8")
     raw = _expand_env(raw)
     try:
@@ -253,7 +255,7 @@ def _parse(data: dict[str, Any]) -> AppConfig:
 
     agent = AgentCfg(
         max_steps=int(agent_raw.get("max_steps", 40)),
-        budget_tokens=int(agent_raw.get("budget_tokens", 80_000)),
+        budget_tokens=int(agent_raw.get("run_token_limit", agent_raw.get("budget_tokens", 80_000))),
         log_dir=agent_raw.get("log_dir", "./logs"),
     )
 
@@ -270,8 +272,10 @@ def _parse(data: dict[str, Any]) -> AppConfig:
     )
 
     context = ContextConfig(
-        repo_map_budget=int(context_raw.get("repo_map_budget", 8_000)),
+        repo_map_budget=int(context_raw.get("repo_map_budget", 4_000)),
         history_window=int(context_raw.get("history_window", 20)),
+        context_window=int(context_raw.get("context_window", 32_768)),
+        repo_map_strategy=context_raw.get("repo_map_strategy", "personalized"),
     )
 
     runtime_raw = data.get("runtime", {})
@@ -288,6 +292,15 @@ def _parse(data: dict[str, Any]) -> AppConfig:
     )
     if type(runtime.setup_network) is not bool or runtime.setup_timeout < 1:
         raise ValueError("Runtime setup_network must be boolean and setup_timeout must be positive")
+    if min(agent.max_steps, agent.budget_tokens, llm.max_tokens, context.history_window,
+           tools.shell.timeout, tools.shell.max_output_tokens, tools.file.max_view_lines) < 1:
+        raise ValueError("Step, token, history and tool limits must be positive")
+    if context.context_window <= llm.max_tokens + 512:
+        raise ValueError("context.context_window must leave room for input after llm.max_tokens")
+    if not 0 <= context.repo_map_budget < context.context_window:
+        raise ValueError("context.repo_map_budget must be nonnegative and smaller than context_window")
+    if context.repo_map_strategy not in ("personalized", "global", "lexical", "legacy"):
+        raise ValueError("Unknown context.repo_map_strategy")
     return AppConfig(llm=llm, agent=agent, tools=tools, context=context, runtime=runtime)
 
 

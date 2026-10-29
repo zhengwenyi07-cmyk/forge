@@ -96,6 +96,17 @@ class Runtime(ABC):
         """
         ...
 
+    def exec_argv(self, argv: list[str], cwd: str | None = None,
+                  timeout: int = 30, stdin: str | None = None) -> RunResult:
+        """Execute data arguments without shell interpretation."""
+        if stdin is not None:
+            return RunResult(-1, "", "Runtime does not support stdin")
+        return self.exec(shlex.join(argv), cwd=cwd, timeout=timeout)
+
+    def exec_python(self, script: str, cwd: str | None = None, timeout: int = 30) -> RunResult:
+        python = getattr(self, "_helper_python", sys.executable)
+        return self.exec_argv([python, "-"], cwd=cwd, timeout=timeout, stdin=script)
+
     def cleanup(self) -> None:
         """释放 runtime 持有的资源（容器、连接等）。默认无操作。"""
 
@@ -161,6 +172,17 @@ class LocalRuntime(Runtime):
             )
         except Exception as e:
             return RunResult(returncode=-1, stdout="", stderr=str(e))
+
+    def exec_argv(self, argv, cwd=None, timeout=30, stdin=None):
+        try:
+            proc = subprocess.run(argv, input=stdin, shell=False, capture_output=True,
+                                  encoding="utf-8", errors="replace", timeout=timeout,
+                                  cwd=cwd or self.repo_path, env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+            return RunResult(proc.returncode, proc.stdout, proc.stderr)
+        except subprocess.TimeoutExpired:
+            return RunResult(-1, "", f"Command timed out after {timeout}s")
+        except OSError as exc:
+            return RunResult(-1, "", str(exc))
 
 
 # ---------------------------------------------------------------------------
@@ -251,7 +273,10 @@ class DockerRuntime(Runtime):
         cwd: str | None = None,
         timeout: int = 30,
     ) -> RunResult:
-        """在容器里执行命令，首次调用时自动启动容器。"""
+        return self.exec_argv(["bash", "-c", cmd], cwd=cwd, timeout=timeout)
+
+    def exec_argv(self, argv, cwd=None, timeout=30, stdin=None):
+        """Keep payloads on stdin, including on Windows hosts."""
         if not self.is_running:
             startup_result = self._start_container()
             if startup_result is not None:
@@ -273,21 +298,20 @@ class DockerRuntime(Runtime):
         if container_cwd != self._workdir and not container_cwd.startswith(self._workdir + "/"):
             return RunResult(-1, "", "Working directory must be inside the repository")
 
-        if cmd.startswith('python -c "import base64;'):
-            cmd = self._helper_python + cmd[len("python"):]
         if self._command_prefix:
-            cmd = self._command_prefix + " && " + cmd
+            argv = ["bash", "-c", self._command_prefix + ' && exec "$@"', "forge-command", *argv]
 
         docker_cmd = [
-            "docker", "exec",
+            "docker", "exec", "-i",
             "--workdir", container_cwd,
             self._container_id,
-            "timeout", "--signal=TERM", "--kill-after=5", str(timeout), "bash", "-c", cmd,
+            "timeout", "--signal=TERM", "--kill-after=5", str(timeout), *argv,
         ]
 
         try:
             proc = subprocess.run(
                 docker_cmd,
+                input=stdin,
                 capture_output=True,
                 encoding="utf-8", errors="replace",
                 timeout=timeout + 5,   # docker exec 本身有少量开销
@@ -303,7 +327,7 @@ class DockerRuntime(Runtime):
             return RunResult(
                 returncode=-1,
                 stdout="",
-                stderr=f"Command timed out after {timeout}s in container: {cmd!r}",
+                stderr=f"Command timed out after {timeout}s in container",
             )
         except Exception as e:
             return RunResult(returncode=-1, stdout="", stderr=str(e))

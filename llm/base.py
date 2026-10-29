@@ -32,6 +32,12 @@ class LLMMessage:
     role: str
     content: str
     tool_call_id: str | None = None     # OpenAI function calling 回传结果时需要
+    tool_calls: list[dict] | None = None
+
+    def to_dict(self):
+        return {"role": self.role, "content": self.content,
+                **({"tool_call_id": self.tool_call_id} if self.tool_call_id else {}),
+                **({"tool_calls": self.tool_calls} if self.tool_calls else {})}
 
 
 @dataclass

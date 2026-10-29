@@ -196,8 +196,8 @@ class TestGetGitDiff:
         diff = agent._get_git_diff(str(tmp_path))
         assert diff is None   # 不是 git repo，不崩溃
 
-    def test_patch_included_in_run_result(self, git_repo):
-        """agent FINISH 后 RunResult.patch 应包含 diff。"""
+    def test_read_only_result_does_not_return_existing_patch(self, git_repo):
+        """只读结果不把工作区原有修改冒充自己的交付。"""
         # 先修改文件（模拟 agent 的 file_write 操作）
         (git_repo / "main.py").write_text("x = 99\n")
 
@@ -216,8 +216,7 @@ class TestGetGitDiff:
             result = agent.run(task, log)
 
         assert result.is_success()
-        assert result.patch is not None
-        assert "main.py" in result.patch
+        assert result.patch is None
 
 
 # ===========================================================================
@@ -247,10 +246,10 @@ class TestRepoMapCache:
         build_call_count = 0
         original_build = __import__("context.repo_map", fromlist=["RepoMap"]).RepoMap.build
 
-        def counting_build(self, budget=8000):
+        def counting_build(self, budget=8000, **kwargs):
             nonlocal build_call_count
             build_call_count += 1
-            return original_build(self, budget)
+            return original_build(self, budget, **kwargs)
 
         with patch("context.repo_map.RepoMap.build", counting_build):
             agent = Agent(backend, registry)

@@ -188,7 +188,7 @@ def _to_openai_messages(messages: list[LLMMessage]) -> list[dict]:
                 "content": msg.content,
             })
         else:
-            result.append({"role": msg.role, "content": msg.content})
+            result.append(msg.to_dict())
     return result
 
 
@@ -224,7 +224,7 @@ def _parse_openai_response(choice: Any, thought: str) -> Action:
         return Action(
             action_type=ActionType.TOOL_CALL,
             thought=thought,
-            tool_call=ToolCall(name=tc.function.name, params=params),
+            tool_call=ToolCall(name=tc.function.name, params=params, **({"id": tc.id} if isinstance(getattr(tc, "id", None), str) and tc.id else {})),
         )
 
     if finish_reason == "stop":
@@ -427,7 +427,9 @@ def _stream_with_tools(self, api_messages, tools, on_text, on_thought=None):
             for tc_delta in delta.tool_calls:
                 idx = tc_delta.index
                 while len(tool_calls_raw) <= idx:
-                    tool_calls_raw.append({"name": "", "arguments": ""})
+                    tool_calls_raw.append({"name": "", "arguments": "", "id": ""})
+                if getattr(tc_delta, "id", None):
+                    tool_calls_raw[idx]["id"] += tc_delta.id
                 if tc_delta.function.name:
                     tool_calls_raw[idx]["name"] += tc_delta.function.name
                 if tc_delta.function.arguments:
@@ -445,7 +447,7 @@ def _stream_with_tools(self, api_messages, tools, on_text, on_thought=None):
             except Exception:
                 params = {"raw": tc["arguments"]}
             fn = SimpleNamespace(name=tc["name"], arguments=tc["arguments"])
-            tcs.append(SimpleNamespace(function=fn))
+            tcs.append(SimpleNamespace(function=fn, id=tc.get("id") or None))
         mock_message = SimpleNamespace(content=full_text or None, tool_calls=tcs)
     else:
         mock_message = SimpleNamespace(content=full_text or None, tool_calls=None)

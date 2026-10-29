@@ -144,6 +144,10 @@ class TaskNotification:
     steps_taken: int = 0            # 子 agent 消耗的步数
     total_tokens: int = 0           # 子 agent 消耗的 token 数
     patch: str | None = None
+    artifact_path: str | None = None
+    base_commit: str | None = None
+    artifact_error: str | None = None
+    recovery_worktree: str | None = None
 
 
 # ============================================================================
@@ -220,6 +224,7 @@ class ToolCall:
     # 例如：shell → {"cmd": "pytest tests/"}, file_read → {"path": "src/main.py"}
     # ToolRegistry.execute_tool() 接收这个 dict 直接传给对应 Tool.execute(params)
     params: dict[str, Any]
+    id: str = field(default_factory=lambda: "call_" + uuid.uuid4().hex)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -411,13 +416,20 @@ class RunResult:
     # 整次运行消耗的 token 总数（input + output）。
     # 累加每一步 LLMResponse.total_tokens。MockBackend 返回固定的 input=100, output=50
     total_tokens: int = 0
-    # git diff HEAD 格式的修改内容（仅 status == SUCCESS 时可能有内容）。
+    # 相对任务初始提交的完整修改；失败/中止也保留部分产物。
     # Agent.run() 在返回前调用 _get_git_diff() 抓取。
     # 如果 repo 中没有修改或 git 命令失败，为 None
     patch: str | None = None
     validation: list[dict[str, Any]] = field(default_factory=list)
     # status == FAILED 时的底层错误信息（如 LLM 调用的具体异常文本）
     error: str | None = None
+    own_tokens: int = 0
+    base_commit: str | None = None
+    validation_status: str = "not_run"
+    artifact_path: str | None = None
+    artifact_error: str | None = None
+    recovery_worktree: str | None = None
+    usage_complete: bool = True
 
     def is_success(self) -> bool:
         return self.status == RunStatus.SUCCESS

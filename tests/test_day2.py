@@ -420,7 +420,7 @@ class TestReflectionTestFailed:
 # ---------------------------------------------------------------------------
 
 class TestReflectionNoEdit:
-    def test_reflection_triggered_after_no_edit_steps(self, tmp_path):
+    def test_read_only_exploration_is_not_prompted_to_edit(self, tmp_path):
         from agent.task import EventType
 
         task = Task(task_type="read_only",
@@ -449,7 +449,7 @@ class TestReflectionNoEdit:
         events = log.replay()
         reflection_events = [e for e in events if e.event_type == EventType.REFLECTION]
         no_edit_reflections = [e for e in reflection_events if e.payload["reason"] == "no_edit"]
-        assert len(no_edit_reflections) >= 1
+        assert len(no_edit_reflections) == 0
         log.close()
 
 

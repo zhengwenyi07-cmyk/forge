@@ -3,6 +3,8 @@ from tools.base import BaseTool, ToolResult
 
 
 class TaskWaitTool(BaseTool):
+    read_only = True
+
     name = "task_wait"
     description = "Wait up to 30 seconds for running sub-agents. Completed results and patches are injected on the next turn."
     parameters_schema = {"type": "object", "properties": {"timeout": {"type": "integer", "minimum": 1, "maximum": 30}}}
@@ -22,6 +24,8 @@ class TaskWaitTool(BaseTool):
 
 
 class TaskMessageTool(BaseTool):
+    read_only = True
+
     name = "task_message"
     description = "Send an instruction to a running child agent; it reads the message before its next model call."
     parameters_schema = {"type": "object", "properties": {"task_id": {"type": "string"}, "message": {"type": "string", "minLength": 1}}, "required": ["task_id", "message"]}
