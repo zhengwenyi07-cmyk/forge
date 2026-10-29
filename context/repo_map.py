@@ -239,7 +239,10 @@ class FileInfo:
 # 对应简历整段第二段"仓库地图生成与上下文注入"。
 # ===========================================================================
 
-class RepoMap:
+from context.map_builder import RankedRepoMap
+
+
+class RepoMap(RankedRepoMap):
     """
     扫描 repo，生成摘要字符串。
 
@@ -258,9 +261,9 @@ class RepoMap:
 
     def __init__(self, repo_path: str | Path) -> None:
         # 将传入路径转为绝对路径（resolve() 解析符号链接和相对路径）
-        self._root = Path(repo_path).resolve()
+        super().__init__(repo_path)
 
-    def build(self, budget: int = 8000) -> str:
+    def _build_legacy(self, budget: int = 8000) -> str:
         """
         生成 repo-map 摘要字符串。
 

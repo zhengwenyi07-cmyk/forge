@@ -112,13 +112,14 @@ class TestRepoMap:
         result = rm.build()
         assert isinstance(result, str)
 
-    def test_large_file_skipped(self, tmp_path):
+    def test_large_file_metadata_retained(self, tmp_path):
         # 超过 500KB 的文件应被跳过
         big = tmp_path / "big.py"
         big.write_bytes(b"x = 1\n" * 100_000)   # ~600KB
         rm = RepoMap(tmp_path)
         result = rm.build()
-        assert "big.py" not in result
+        assert "big.py" in result
+        assert not rm.index.files["big.py"].definitions
 
 
 class TestExtractPythonSymbols:
