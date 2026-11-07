@@ -125,12 +125,14 @@ python -m evaluation.repo_map_probe --repo . --task "Fix native tool result mess
 python -m evaluation.run_ab --config config/mimo.local.yaml --map-strategy personalized --repo-map-budget 4000 --output evaluation/runs/framework-ppr
 ```
 
+长时间实验可显式增加 `--unlimited-run-tokens`，仅取消单题累计 token 上限，`max_steps` 仍作为循环保护。运行目录会原子更新 `progress.json` 与 `progress.md`；重新执行同一命令时复用已完成试题，并重跑 `interrupted` 或 `infrastructure_error` 试题。Agent 的逐步事件仍写入各 trial 的 JSONL 日志，但当前不恢复一次被中断的模型对话中间态。
+
 本轮没有完成 30 题真实消融，没有声称 PageRank 提升 resolved rate。
 
 ## 7. 仍需后续改进
 
 - Python 图最完整；其他语言仍以 tree-sitter/正则定义抽取为主。动态导入、重导出、继承分派和装饰器可能漏边。
 - 非 Git 目录忽略规则为实用回退，并非完整 Git ignore 语法；Git 仓库使用 Git 本身的规则。
-- 轻量阶段与证据记忆不等于自动证明假设，也不支持跨进程恢复正在执行的 Agent。
+- 轻量阶段与证据记忆不等于自动证明假设；跨进程恢复目前以 trial 为边界，不恢复正在执行的 Agent 对话中间态。
 - 只读 review 不在用户源码目录运行 linter/测试；后续可加入临时工作区中的独立执行能力。
 - Token 估算和检索权重需在独立开发集调参，再用固定评估集验证，不能根据单条查询认定新默认必然更优。

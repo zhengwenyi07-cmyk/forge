@@ -3,11 +3,15 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+from datetime import datetime, timezone
 import json
+import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
+import uuid
 from pathlib import Path
 
 from agent.core import Agent, AgentConfig
@@ -22,7 +26,53 @@ from tools.workspace import capture_patch
 
 
 def write_json(path, value):
-    path.write_bytes((json.dumps(value, indent=2, ensure_ascii=True) + "\n").encode("utf-8"))
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    temporary.write_bytes((json.dumps(value, indent=2, ensure_ascii=True) + "\n").encode("utf-8"))
+    os.replace(temporary, path)
+
+
+class ProgressTracker:
+    """Durable experiment matrix; JSONL logs remain the per-step checkpoint."""
+
+    def __init__(self, output: Path, rows: list[dict], models: list[str]):
+        self.output = output
+        self._lock = threading.Lock()
+        self._order = [(model, row["instance_id"]) for row in rows for model in models]
+        self._state = {f"{model}/{instance}": {"model": model, "instance_id": instance,
+                       "status": "pending", "tokens": 0, "seconds": 0}
+                       for model, instance in self._order}
+        existing = output / "progress.json"
+        if existing.exists():
+            saved = json.loads(existing.read_text(encoding="utf-8"))
+            for item in saved.get("trials", []):
+                key = f"{item.get('model')}/{item.get('instance_id')}"
+                if key in self._state:
+                    self._state[key].update(item)
+        self._write()
+
+    def update(self, model: str, instance_id: str, status: str, **fields):
+        with self._lock:
+            item = self._state[f"{model}/{instance_id}"]
+            item.update(fields, status=status, updated_at=datetime.now(timezone.utc).isoformat())
+            self._write()
+
+    def _write(self):
+        trials = [self._state[f"{model}/{instance}"] for model, instance in self._order]
+        counts = {status: sum(item["status"] == status for item in trials)
+                  for status in ("pending", "running", "reused", "success", "gave_up",
+                                 "max_steps", "failed", "interrupted", "infrastructure_error")}
+        write_json(self.output / "progress.json", {"updated_at": datetime.now(timezone.utc).isoformat(),
+                                                   "counts": counts, "trials": trials})
+        lines = ["# A/B progress", "", f"Updated: {datetime.now(timezone.utc).isoformat()}", "",
+                 "| Model | Instance | Status | Tokens | Seconds |", "| --- | --- | --- | ---: | ---: |"]
+        lines.extend(f"| {item['model']} | {item['instance_id']} | {item['status']} | "
+                     f"{item.get('tokens', 0)} | {item.get('seconds', 0)} |" for item in trials)
+        path = self.output / "progress.md"
+        temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        temporary.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        os.replace(temporary, path)
 
 
 def code_fingerprint(root: Path):
@@ -34,7 +84,7 @@ def code_fingerprint(root: Path):
     return {"commit": git, "source_sha256": digest(json.dumps(files, sort_keys=True).encode())}
 
 
-def run_trial(row, model, cfg, settings, image, repos_dir, output, fingerprint):
+def run_trial(row, model, cfg, settings, image, repos_dir, output, fingerprint, progress=None):
     trial = output / model / row["instance_id"]
     trial.mkdir(parents=True, exist_ok=True)
     result_file = trial / "result.json"
@@ -47,10 +97,16 @@ def run_trial(row, model, cfg, settings, image, repos_dir, output, fingerprint):
         saved = json.loads(result_file.read_text())
         if saved["identity"] != identity:
             raise RuntimeError(f"Resume fingerprint mismatch: {trial}")
-        if saved["status"] != "infrastructure_error":
+        if saved["status"] not in ("infrastructure_error", "interrupted"):
+            if progress:
+                progress.update(model, row["instance_id"], "reused", tokens=saved.get("tokens", 0),
+                                seconds=saved.get("seconds", 0), resumed_from=saved["status"])
             return saved
+    if progress:
+        progress.update(model, row["instance_id"], "running", started_at=datetime.now(timezone.utc).isoformat())
     start = time.monotonic()
     record = {"identity": identity, "status": "infrastructure_error", "patch": "", "tokens": 0, "seconds": 0}
+    interrupted = False
     with tempfile.TemporaryDirectory(prefix="repo-", dir=trial) as temp:
         repo = Path(temp) / "checkout"
         source = repos_dir / row["repo"].replace("/", "_")
@@ -89,15 +145,28 @@ def run_trial(row, model, cfg, settings, image, repos_dir, output, fingerprint):
             with EventLog.create(task, log_dir=str(trial / "logs")) as log:
                 result = agent.run(task, log)
             record.update(status="infrastructure_error" if result.error else result.status.value, tokens=result.total_tokens, validation=result.validation, summary=result.summary.replace(cfg.llm.api_key, "[REDACTED]"), patch=capture_patch(str(repo), base_ref=base_commit))
+        except KeyboardInterrupt:
+            interrupted = True
+            record.update(status="interrupted", error="Interrupted; saved checkpoint may be resumed")
+            record["patch"] = capture_patch(str(repo), base_ref=base_commit)
         except Exception as exc:
             # Errors may contain server-provided request details: redact the configured secret.
             record["error"] = str(exc).replace(cfg.llm.api_key, "[REDACTED]")
         finally:
             runtime.cleanup()
     record["seconds"] = round(time.monotonic() - start, 3)
-    (trial / "prediction.patch").write_bytes(record.pop("patch").encode("utf-8"))
+    patch = record.pop("patch")
+    patch_path = trial / "prediction.patch"
+    patch_tmp = patch_path.with_name(f".{patch_path.name}.{uuid.uuid4().hex}.tmp")
+    patch_tmp.write_bytes(patch.encode("utf-8"))
+    os.replace(patch_tmp, patch_path)
     write_json(result_file, record)
+    if progress:
+        progress.update(model, row["instance_id"], record["status"], tokens=record["tokens"],
+                        seconds=record["seconds"], error=record.get("error"))
     print(f"{model} {row['instance_id']}: {record['status']} ({record['seconds']}s)", flush=True)
+    if interrupted:
+        raise KeyboardInterrupt
     return record
 
 
@@ -112,6 +181,8 @@ def main():
     parser.add_argument("--workers", type=int, default=2)
     parser.add_argument("--map-strategy", choices=("legacy", "lexical", "global", "personalized"), help="Fix one map strategy for both models; use separate output directories for map ablations")
     parser.add_argument("--repo-map-budget", type=int, help="Fix the same map token budget for both models")
+    parser.add_argument("--unlimited-run-tokens", action="store_true",
+                        help="Disable the cumulative per-task token cap; max_steps still prevents infinite loops")
     parser.add_argument("--prepare-only", action="store_true")
     parser.add_argument("--preflight-only", action="store_true", help="Pull images and run the gold smoke without calling either model")
     parser.add_argument("--skip-gold-smoke", action="store_true", help="Only use after a successful gold smoke for these exact images")
@@ -175,12 +246,18 @@ def main():
     if (output / "code.json").exists() and json.loads((output / "code.json").read_text()) != fingerprint:
         raise RuntimeError("Code changed since this experiment started; use a new output directory")
     write_json(output / "code.json", fingerprint)
-    settings = manifest["settings"]
+    settings = dict(manifest["settings"])
+    if args.unlimited_run_tokens:
+        settings["budget_tokens"] = None
+    effective_manifest = dict(manifest, settings=settings)
+    write_json(output / "effective-manifest.json", effective_manifest)
+    progress = ProgressTracker(output, rows, settings["models"])
 
     def paired(index_row):
         index, row = index_row
         models = settings["models"] if index % 2 == 0 else list(reversed(settings["models"]))
-        return [run_trial(row, model, cfg, settings, images[row["instance_id"]], args.repos_dir.resolve(), output, fingerprint) for model in models]
+        return [run_trial(row, model, cfg, settings, images[row["instance_id"]], args.repos_dir.resolve(),
+                          output, fingerprint, progress) for model in models]
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
         list(pool.map(paired, enumerate(rows)))

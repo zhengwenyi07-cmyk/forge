@@ -18,7 +18,7 @@ class BudgetExceeded(RuntimeError):
 class BudgetLedger:
     """Reserve concurrent requests before dispatch; settle each request exactly once."""
 
-    def __init__(self, limit: int):
+    def __init__(self, limit: int | None):
         self.limit = limit
         self._lock = threading.Lock()
         self._pending = {}
@@ -39,7 +39,7 @@ class BudgetLedger:
             if self._closed:
                 raise BudgetExceeded("Run is closing; no further model requests are permitted")
             used = sum(tokens for who, tokens in self._calls.values())
-            if used + sum(self._pending.values()) + estimate > self.limit:
+            if self.limit is not None and used + sum(self._pending.values()) + estimate > self.limit:
                 raise BudgetExceeded(f"Run token budget cannot accommodate next request ({used}/{self.limit}; requested {estimate})")
             key = uuid.uuid4().hex
             self._pending[key] = estimate

@@ -188,7 +188,7 @@ class Task:
     max_steps: int = 40
     # 整次运行的 token 预算（包含 system + repo_map + history + observation + 15% 预留）。
     # 默认 80_000，对应 TokenBudget.default_plan() 的分配基准
-    budget_tokens: int = 80_000
+    budget_tokens: int | None = 80_000
     # Explicit contract: analysis tasks can finish without a patch or tests.
     task_type: str = "modify"
 

@@ -236,7 +236,11 @@ class DockerRuntime(Runtime):
         self._repo_path = str(Path(repo_path).resolve())
         self._image = image
         self._extra_mounts = extra_mounts or []
-        self._setup_cmds = list(setup_cmds or [])
+        # A directly constructed DockerRuntime must be usable on its own, not
+        # only through create_runtime().  In particular, git commits inside a
+        # fresh container need an identity even when the mounted repository has
+        # no local user configuration.
+        self._setup_cmds = list(DEFAULT_SETUP_CMDS if setup_cmds is None else setup_cmds)
         self._check_cmds = list(check_cmds or [])
         self._setup_timeout = setup_timeout
         self._environment: dict[str, str] = {}
@@ -396,10 +400,11 @@ class DockerRuntime(Runtime):
 
         # 补上 git 用户配置（避免容器内 git commit 报错 "Please tell me who you are"）
         # 放在 setup_cmds 尾部（apt-get install git 已经先执行完了）
-        if any("git" in cmd for cmd in (self._setup_cmds or [])):
-            self._setup_cmds = list(self._setup_cmds or [])
-            self._setup_cmds.append("git config --global user.email 'agent@forge.dev'")
-            self._setup_cmds.append("git config --global user.name 'Forge Agent'")
+        if any("git" in cmd for cmd in self._setup_cmds):
+            if not any("git config" in cmd and "user.email" in cmd for cmd in self._setup_cmds):
+                self._setup_cmds.append("git config --global user.email 'agent@forge.dev'")
+            if not any("git config" in cmd and "user.name" in cmd for cmd in self._setup_cmds):
+                self._setup_cmds.append("git config --global user.name 'Forge Agent'")
 
         # 额外 mount
         for host_path, container_path in self._extra_mounts:

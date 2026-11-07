@@ -159,7 +159,7 @@ class SubAgent:
         # Agent 配置（比父 Agent 更保守）
         self._config = AgentConfig(
             max_steps=max_steps,
-            budget_tokens=min(task.budget_tokens, 40_000),  # 子 Agent 预算有限
+            budget_tokens=min(task.budget_tokens, 40_000) if task.budget_tokens is not None else 40_000,
             history_max_messages=40,
             stream=False,  # 子 Agent 不流式输出
         )

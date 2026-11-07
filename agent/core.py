@@ -93,7 +93,7 @@ class AgentConfig:
     test_tool_names: tuple[str, ...] = ("test", "pytest")
     # ── 预算与历史 ─────────────────────────────────────────────────────
     # 整次运行的累计 token 上限；context_window 单独约束每次请求
-    budget_tokens: int = 80_000
+    budget_tokens: int | None = 80_000
     context_window: int = 32_768
     max_output_tokens: int = 8192
     repo_map_budget: int = 4000
@@ -300,7 +300,9 @@ class Agent:
         # ═══════════════════════════════════════════════════════════════════
         for step in range(1, task.max_steps + 1):
             logger.debug("Step %d/%d", step, task.max_steps)
-            if self.context.ledger.total >= self.context.ledger.limit or total_tokens >= task.budget_tokens:
+            ledger_limit = self.context.ledger.limit
+            if ((ledger_limit is not None and self.context.ledger.total >= ledger_limit) or
+                    (task.budget_tokens is not None and total_tokens >= task.budget_tokens)):
                 reason = f"Run token budget exhausted ({task.budget_tokens})"
                 log.log_task_failed(steps=step - 1, reason=reason)
                 return RunResult(task.task_id, RunStatus.GAVE_UP, reason, step - 1, total_tokens)

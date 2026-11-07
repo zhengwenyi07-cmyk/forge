@@ -29,6 +29,29 @@ def test_budget_reservations_and_duplicate_delivery():
     assert ledger.total == 650
 
 
+def test_unlimited_budget_ledger_never_rejects_by_usage():
+    ledger = BudgetLedger(None)
+    first = ledger.reserve("task", 10**12)
+    ledger.settle(first, "task", 10**9)
+    second = ledger.reserve("task", 10**12)
+    ledger.settle(second, "task", 10**9)
+    assert ledger.total == 2 * 10**9
+    assert ledger.snapshot()["limit"] is None
+
+
+def test_agent_with_unlimited_run_budget_can_finish(tmp_path):
+    backend = MockBackend([
+        Action(ActionType.TOOL_CALL, "inspect", ToolCall("noop", {})),
+        Action(ActionType.FINISH, "", message="done"),
+    ], input_tokens=100_000, output_tokens=50_000)
+    task = Task("Inspect", str(tmp_path), max_steps=2, budget_tokens=None, task_type="read_only")
+    with EventLog.create(task, str(tmp_path / "logs")) as log:
+        result = Agent(backend, ToolRegistry().register(NoopTool()),
+                       AgentConfig(budget_tokens=None)).run(task, log)
+    assert result.is_success()
+    assert result.total_tokens == 300_000
+
+
 def test_failed_fork_patch_survives_worktree_cleanup(real_repo, tmp_path):
     import subprocess
     source = real_repo / "partial.py"

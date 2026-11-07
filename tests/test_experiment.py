@@ -5,6 +5,7 @@ import pytest
 
 from evaluation.suite import freeze, load_suite, select_tasks
 from evaluation.summarize import paired_stats
+from evaluation.run_ab import ProgressTracker, write_json
 
 
 def test_task_selection_is_balanced_deterministic_and_order_independent():
@@ -38,3 +39,26 @@ def test_paired_statistics_use_discordant_pairs():
     assert result["flash_only_resolved"] == 1
     assert result["mcnemar_exact_p"] == 1.0
     assert paired_stats([False] * 20, [False] * 20)["paired_bootstrap_95_ci"] == [0, 0]
+
+
+def test_progress_tracker_is_durable_and_resumable(tmp_path):
+    rows = [{"instance_id": "task-a"}, {"instance_id": "task-b"}]
+    models = ["flash", "pro"]
+    tracker = ProgressTracker(tmp_path, rows, models)
+    tracker.update("flash", "task-a", "running", tokens=12)
+    tracker.update("flash", "task-a", "success", tokens=34, seconds=1.5)
+    saved = json.loads((tmp_path / "progress.json").read_text())
+    assert saved["counts"]["success"] == 1
+    assert "| flash | task-a | success | 34 | 1.5 |" in (tmp_path / "progress.md").read_text()
+    resumed = ProgressTracker(tmp_path, rows, models)
+    resumed.update("pro", "task-b", "gave_up", tokens=55)
+    saved = json.loads((tmp_path / "progress.json").read_text())
+    assert saved["counts"]["success"] == saved["counts"]["gave_up"] == 1
+
+
+def test_write_json_replaces_complete_document(tmp_path):
+    path = tmp_path / "state.json"
+    write_json(path, {"value": "old", "padding": "x" * 100})
+    write_json(path, {"value": "new"})
+    assert json.loads(path.read_text()) == {"value": "new"}
+    assert not list(tmp_path.glob("*.tmp"))
