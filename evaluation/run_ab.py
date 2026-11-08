@@ -109,28 +109,30 @@ def run_trial(row, model, cfg, settings, image, repos_dir, output, fingerprint, 
     interrupted = False
     with tempfile.TemporaryDirectory(prefix="repo-", dir=trial) as temp:
         repo = Path(temp) / "checkout"
-        source = repos_dir / row["repo"].replace("/", "_")
-        if (source / ".git").exists():
-            subprocess.run(["git", "-c", "core.autocrlf=false", "clone", "--no-checkout", "--no-hardlinks", str(source), str(repo)], check=True, capture_output=True)
-        else:
-            # Official images contain the source at base_commit; avoid downloading
-            # another full history when a local repository cache is unavailable.
-            container = subprocess.check_output(["docker", "create", image], text=True).strip()
-            try:
-                repo.mkdir()
-                subprocess.run(["docker", "cp", f"{container}:/testbed/.", str(repo)], check=True, capture_output=True)
-            finally:
-                subprocess.run(["docker", "rm", container], check=True, capture_output=True)
-        subprocess.run(["git", "config", "core.autocrlf", "false"], cwd=repo, check=True)
-        subprocess.run(["git", "checkout", "--detach", row["base_commit"]], cwd=repo, check=True, capture_output=True)
         base_commit = row["base_commit"]
-        if capture_patch(str(repo)):
-            raise RuntimeError("Trial must start with a clean checkout at base_commit")
-        runtime = DockerRuntime(str(repo), image=image, setup_cmds=["git config --global safe.directory /testbed"])
-        runtime._workdir = "/testbed"
-        runtime._command_prefix = "source /opt/miniconda3/bin/activate testbed"
-        runtime._helper_python = "/opt/miniconda3/bin/python"
+        runtime = None
         try:
+            source = repos_dir / row["repo"].replace("/", "_")
+            if (source / ".git").exists():
+                subprocess.run(["git", "-c", "core.autocrlf=false", "clone", "--no-checkout", "--no-hardlinks", str(source), str(repo)], check=True, capture_output=True)
+            else:
+                # Official images contain the source at base_commit; avoid downloading
+                # another full history when a local repository cache is unavailable.
+                container = subprocess.check_output(["docker", "create", image], text=True).strip()
+                try:
+                    repo.mkdir()
+                    subprocess.run(["docker", "cp", f"{container}:/testbed/.", str(repo)], check=True, capture_output=True)
+                finally:
+                    subprocess.run(["docker", "rm", container], check=True, capture_output=True)
+            subprocess.run(["git", "config", "core.autocrlf", "false"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "core.longpaths", "true"], cwd=repo, check=True)
+            subprocess.run(["git", "checkout", "--detach", base_commit], cwd=repo, check=True, capture_output=True)
+            if capture_patch(str(repo)):
+                raise RuntimeError("Trial must start with a clean checkout at base_commit")
+            runtime = DockerRuntime(str(repo), image=image, setup_cmds=["git config --global safe.directory /testbed"])
+            runtime._workdir = "/testbed"
+            runtime._command_prefix = "source /opt/miniconda3/bin/activate testbed"
+            runtime._helper_python = "/opt/miniconda3/bin/python"
             check = runtime.preflight()
             if not check.success:
                 raise RuntimeError(check.stderr)
@@ -148,12 +150,19 @@ def run_trial(row, model, cfg, settings, image, repos_dir, output, fingerprint, 
         except KeyboardInterrupt:
             interrupted = True
             record.update(status="interrupted", error="Interrupted; saved checkpoint may be resumed")
-            record["patch"] = capture_patch(str(repo), base_ref=base_commit)
+            if (repo / ".git").exists():
+                record["patch"] = capture_patch(str(repo), base_ref=base_commit)
         except Exception as exc:
             # Errors may contain server-provided request details: redact the configured secret.
             record["error"] = str(exc).replace(cfg.llm.api_key, "[REDACTED]")
+            if (repo / ".git").exists():
+                try:
+                    record["patch"] = capture_patch(str(repo), base_ref=base_commit)
+                except Exception:
+                    pass
         finally:
-            runtime.cleanup()
+            if runtime is not None:
+                runtime.cleanup()
     record["seconds"] = round(time.monotonic() - start, 3)
     patch = record.pop("patch")
     patch_path = trial / "prediction.patch"

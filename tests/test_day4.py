@@ -328,6 +328,32 @@ class TestOpenAICompatBackend:
         assert result.action.tool_call.name == "shell"
         assert result.action.tool_call.params == {"cmd": "pytest"}
 
+    def test_mimo_textual_finish_with_tool_calls_reason_is_parsed_safely(self):
+        backend = self._make_backend(model="mimo-v2.6-flash")
+        response = self._make_response(
+            "tool_calls",
+            content="<tool_call><function=finish><parameter=summary>Tests pass and the patch is ready.",
+            tool_calls=None,
+        )
+        backend._client.chat.completions.create.return_value = response
+
+        result = backend.complete(make_messages("user", "fix it"), [make_tool_schema("finish")])
+        assert result.action.action_type == ActionType.TOOL_CALL
+        assert result.action.tool_call.name == "finish"
+        assert result.action.tool_call.params == {"summary": "Tests pass and the patch is ready."}
+
+    def test_textual_non_finish_tool_is_not_executed(self):
+        backend = self._make_backend(model="mimo-v2.6-flash")
+        response = self._make_response(
+            "tool_calls",
+            content="<tool_call><function=shell><parameter=cmd>dangerous command",
+            tool_calls=None,
+        )
+        backend._client.chat.completions.create.return_value = response
+
+        result = backend.complete(make_messages("user", "fix it"), [make_tool_schema("shell")])
+        assert result.action.action_type == ActionType.GIVE_UP
+
     def test_stop_requires_explicit_finish(self):
         backend = self._make_backend()
         response = self._make_response("stop", content="Task is done.")

@@ -211,6 +211,25 @@ def _parse_openai_response(choice: Any, thought: str) -> Action:
     finish_reason = choice.finish_reason
     message = choice.message
 
+    # MiMo can occasionally report finish_reason=tool_calls while placing a
+    # textual finish call in content and leaving message.tool_calls empty.
+    # Accept only the explicit finish tool here; never execute arbitrary tools
+    # parsed from free-form text.
+    if finish_reason == "tool_calls" and not message.tool_calls:
+        content = getattr(message, "content", None) or ""
+        match = re.search(
+            r"<tool_call>\s*<function=finish>\s*<parameter=summary>(.*?)(?:</tool_call>|$)",
+            content,
+            re.DOTALL,
+        )
+        if match:
+            summary = match.group(1).strip()
+            return Action(
+                action_type=ActionType.TOOL_CALL,
+                thought=thought,
+                tool_call=ToolCall(name="finish", params={"summary": summary}),
+            )
+
     if finish_reason == "tool_calls" and message.tool_calls:
         if len(message.tool_calls) != 1:
             return Action(ActionType.REFLECTION, "Call exactly one tool per turn; no calls from this batch were executed.")
