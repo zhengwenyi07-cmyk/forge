@@ -5,7 +5,7 @@ import pytest
 
 from evaluation.suite import freeze, load_suite, select_tasks
 from evaluation.summarize import paired_stats
-from evaluation.run_ab import ProgressTracker, write_json
+from evaluation.run_ab import ProgressTracker, import_reusable_trial, write_json
 
 
 def test_task_selection_is_balanced_deterministic_and_order_independent():
@@ -62,3 +62,51 @@ def test_write_json_replaces_complete_document(tmp_path):
     write_json(path, {"value": "new"})
     assert json.loads(path.read_text()) == {"value": "new"}
     assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_completed_trial_can_be_imported_with_provenance(tmp_path):
+    source_root = tmp_path / "old"
+    source = source_root / "flash" / "task-a"
+    source.mkdir(parents=True)
+    old_identity = {
+        "model": "flash", "instance_id": "task-a", "base_commit": "abc",
+        "code": {"commit": "old"},
+        "settings": {"max_steps": 40, "budget_tokens": None, "max_tokens": 8192,
+                     "temperature": 0, "multi_agent": False, "models": ["flash", "pro"]},
+        "effective_config": {"endpoint": "https://example.invalid/v1"},
+    }
+    write_json(source / "result.json", {"identity": old_identity, "status": "max_steps",
+                                         "tokens": 123, "seconds": 4})
+    (source / "prediction.patch").write_text("diff --git a/a b/a\n")
+    new_identity = dict(old_identity, code={"commit": "new"},
+                        settings=dict(old_identity["settings"], models=["flash"]))
+    target = tmp_path / "new" / "flash" / "task-a"
+    target.mkdir(parents=True)
+
+    imported = import_reusable_trial([source_root], target, "flash",
+                                     {"instance_id": "task-a"}, new_identity)
+
+    assert imported["status"] == "max_steps"
+    assert imported["identity"] == new_identity
+    assert imported["reused_from"]["original_identity"] == old_identity
+    assert (target / "prediction.patch").read_text() == "diff --git a/a b/a\n"
+
+
+def test_reusable_trial_rejects_effective_configuration_drift(tmp_path):
+    source = tmp_path / "old" / "flash" / "task-a"
+    source.mkdir(parents=True)
+    identity = {
+        "model": "flash", "instance_id": "task-a", "base_commit": "abc",
+        "settings": {"max_steps": 40, "budget_tokens": None, "max_tokens": 8192,
+                     "temperature": 0, "multi_agent": False},
+        "effective_config": {"endpoint": "https://old.invalid/v1"},
+    }
+    write_json(source / "result.json", {"identity": identity, "status": "success"})
+    (source / "prediction.patch").write_text("")
+    target = tmp_path / "new"
+    target.mkdir()
+    changed = dict(identity, effective_config={"endpoint": "https://new.invalid/v1"})
+
+    with pytest.raises(RuntimeError, match="configuration mismatch"):
+        import_reusable_trial([tmp_path / "old"], target, "flash",
+                              {"instance_id": "task-a"}, changed)

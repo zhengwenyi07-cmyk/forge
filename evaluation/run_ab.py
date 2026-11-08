@@ -33,6 +33,43 @@ def write_json(path, value):
     os.replace(temporary, path)
 
 
+def import_reusable_trial(reuse_roots, trial, model, row, identity):
+    """Import a completed trial while preserving its original provenance."""
+    for root in reuse_roots:
+        source = Path(root).resolve() / model / row["instance_id"]
+        result_file = source / "result.json"
+        patch_file = source / "prediction.patch"
+        if not result_file.exists():
+            continue
+        if not patch_file.exists():
+            raise RuntimeError(f"Reusable trial has no prediction patch: {source}")
+        saved = json.loads(result_file.read_text(encoding="utf-8"))
+        original = saved.get("identity", {})
+        for field in ("model", "instance_id", "base_commit"):
+            if original.get(field) != identity[field]:
+                raise RuntimeError(f"Reusable trial identity mismatch ({field}): {source}")
+        if original.get("effective_config") != identity["effective_config"]:
+            raise RuntimeError(f"Reusable trial configuration mismatch: {source}")
+        comparable = ("max_steps", "budget_tokens", "max_tokens", "temperature", "multi_agent")
+        if any(original.get("settings", {}).get(key) != identity["settings"].get(key) for key in comparable):
+            raise RuntimeError(f"Reusable trial settings mismatch: {source}")
+        if saved.get("status") in ("infrastructure_error", "interrupted"):
+            continue
+        imported = dict(saved)
+        imported["identity"] = identity
+        imported["reused_from"] = {
+            "trial": str(source),
+            "original_identity": original,
+        }
+        patch_target = trial / "prediction.patch"
+        patch_tmp = patch_target.with_name(f".{patch_target.name}.{uuid.uuid4().hex}.tmp")
+        patch_tmp.write_bytes(patch_file.read_bytes())
+        os.replace(patch_tmp, patch_target)
+        write_json(trial / "result.json", imported)
+        return imported
+    return None
+
+
 class ProgressTracker:
     """Durable experiment matrix; JSONL logs remain the per-step checkpoint."""
 
@@ -84,7 +121,8 @@ def code_fingerprint(root: Path):
     return {"commit": git, "source_sha256": digest(json.dumps(files, sort_keys=True).encode())}
 
 
-def run_trial(row, model, cfg, settings, image, repos_dir, output, fingerprint, progress=None):
+def run_trial(row, model, cfg, settings, image, repos_dir, output, fingerprint, progress=None,
+              reuse_roots=()):
     trial = output / model / row["instance_id"]
     trial.mkdir(parents=True, exist_ok=True)
     result_file = trial / "result.json"
@@ -102,6 +140,13 @@ def run_trial(row, model, cfg, settings, image, repos_dir, output, fingerprint, 
                 progress.update(model, row["instance_id"], "reused", tokens=saved.get("tokens", 0),
                                 seconds=saved.get("seconds", 0), resumed_from=saved["status"])
             return saved
+    reused = import_reusable_trial(reuse_roots, trial, model, row, identity)
+    if reused is not None:
+        if progress:
+            progress.update(model, row["instance_id"], "reused", tokens=reused.get("tokens", 0),
+                            seconds=reused.get("seconds", 0), resumed_from=reused["status"])
+        print(f"{model} {row['instance_id']}: reused ({reused['status']})", flush=True)
+        return reused
     if progress:
         progress.update(model, row["instance_id"], "running", started_at=datetime.now(timezone.utc).isoformat())
     start = time.monotonic()
@@ -188,6 +233,10 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--harness-image", default="forge-swebench:4.1.0")
     parser.add_argument("--workers", type=int, default=2)
+    parser.add_argument("--model", action="append", dest="models",
+                        help="Run only this manifest model; repeat to select multiple models")
+    parser.add_argument("--reuse-trials-from", action="append", type=Path, default=[],
+                        help="Import matching completed trials from another run directory")
     parser.add_argument("--map-strategy", choices=("legacy", "lexical", "global", "personalized"), help="Fix one map strategy for both models; use separate output directories for map ablations")
     parser.add_argument("--repo-map-budget", type=int, help="Fix the same map token budget for both models")
     parser.add_argument("--unlimited-run-tokens", action="store_true",
@@ -256,6 +305,12 @@ def main():
         raise RuntimeError("Code changed since this experiment started; use a new output directory")
     write_json(output / "code.json", fingerprint)
     settings = dict(manifest["settings"])
+    if args.models:
+        requested = list(dict.fromkeys(args.models))
+        unknown = sorted(set(requested) - set(settings["models"]))
+        if unknown:
+            parser.error(f"--model is not present in the frozen manifest: {', '.join(unknown)}")
+        settings["models"] = requested
     if args.unlimited_run_tokens:
         settings["budget_tokens"] = None
     effective_manifest = dict(manifest, settings=settings)
@@ -266,7 +321,7 @@ def main():
         index, row = index_row
         models = settings["models"] if index % 2 == 0 else list(reversed(settings["models"]))
         return [run_trial(row, model, cfg, settings, images[row["instance_id"]], args.repos_dir.resolve(),
-                          output, fingerprint, progress) for model in models]
+                          output, fingerprint, progress, args.reuse_trials_from) for model in models]
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
         list(pool.map(paired, enumerate(rows)))
