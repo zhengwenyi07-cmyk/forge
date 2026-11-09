@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from evaluation.suite import freeze, load_suite, select_tasks
-from evaluation.summarize import paired_stats
+from evaluation.summarize import paired_stats, summarize
 from evaluation.run_ab import ProgressTracker, import_reusable_trial, write_json
 
 
@@ -110,3 +110,49 @@ def test_reusable_trial_rejects_effective_configuration_drift(tmp_path):
     with pytest.raises(RuntimeError, match="configuration mismatch"):
         import_reusable_trial([tmp_path / "old"], target, "flash",
                               {"instance_id": "task-a"}, changed)
+
+
+def test_summarize_supports_flash_only_effective_manifest(tmp_path, monkeypatch):
+    tasks = [{"instance_id": "task-a"}, {"instance_id": "task-b"}]
+    write_json(tmp_path / "manifest.json", {
+        "tasks": tasks, "settings": {"models": ["flash", "pro"]},
+    })
+    write_json(tmp_path / "effective-manifest.json", {
+        "tasks": tasks, "settings": {"models": ["flash"]},
+    })
+    write_json(tmp_path / "flash-predictions.json", [
+        {"instance_id": "task-a", "model_patch": "diff", "model_name_or_path": "flash"},
+        {"instance_id": "task-b", "model_patch": "", "model_name_or_path": "flash"},
+    ])
+    for instance_id, status, tokens, seconds, patch in [
+        ("task-a", "success", 10, 2.5, "diff"),
+        ("task-b", "max_steps", 20, 4.5, ""),
+    ]:
+        trial = tmp_path / "flash" / instance_id
+        trial.mkdir(parents=True)
+        write_json(trial / "result.json", {
+            "status": status, "tokens": tokens, "seconds": seconds,
+        })
+        (trial / "prediction.patch").write_text(patch)
+    monkeypatch.setattr(
+        "evaluation.summarize.validate_reports",
+        lambda *args, **kwargs: {"resolved_ids": ["task-a"]},
+    )
+
+    result = summarize(tmp_path)
+
+    assert set(result["models"]) == {"flash"}
+    assert "paired" not in result
+    assert result["scope"].startswith("SWE-bench Lite frozen-suite evaluation")
+    assert result["models"]["flash"] == {
+        "resolved": 1,
+        "resolved_rate": 0.5,
+        "nonempty_patches": 1,
+        "nonempty_patch_rate": 0.5,
+        "tokens": 30,
+        "total_seconds": 7.0,
+        "median_seconds": 3.5,
+        "agent_completed": 1,
+        "status_counts": {"max_steps": 1, "success": 1},
+        "resolved_ids": ["task-a"],
+    }
