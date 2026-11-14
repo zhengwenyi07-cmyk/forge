@@ -11,6 +11,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
+REPO_QUERY_TOOLS = frozenset({"repo_search", "repo_symbols", "repo_related_files", "repo_tree", "repo_map"})
+REPO_LOCALIZATION_TOOLS = frozenset({"repo_search", "repo_symbols"})
+LEGACY_DISCOVERY_TOOLS = frozenset({"search_text", "find_files", "find_symbol", "file_view", "file_read"})
+SHELL_DISCOVERY_RE = re.compile(
+    r"(?:^|[;&|]\s*)(?:rg|grep|find|fd|ls|tree|cat|sed|head|tail)\b",
+    flags=re.IGNORECASE,
+)
+
+
 class BudgetExceeded(RuntimeError):
     pass
 
@@ -86,8 +95,69 @@ class RunContext:
     evidence: list[dict] = field(default_factory=list)
     changed: bool = False
     child_results: dict = field(default_factory=dict)
+    retrieval_enabled: bool = False
+    retrieval_required: bool = False
+    retrieval_refresh_steps: int = 3
+    retrieval_attempts: int = 0
+    localization_successes: int = 0
+    retrieval_redirects: int = 0
+    retrieval_refreshes: int = 0
+    retrieval_degraded_reason: str | None = None
+    discovery_steps_since_retrieval: int = 0
+
+    def configure_retrieval(self, enabled: bool, refresh_steps: int = 3):
+        self.retrieval_enabled = bool(enabled)
+        self.retrieval_required = bool(enabled)
+        self.retrieval_refresh_steps = max(1, int(refresh_steps))
+
+    @staticmethod
+    def _is_legacy_discovery(tool, params):
+        if tool in LEGACY_DISCOVERY_TOOLS:
+            return True
+        if tool != "shell":
+            return False
+        command = str(params.get("cmd") or params.get("command") or "")
+        return bool(SHELL_DISCOVERY_RE.search(command))
+
+    def retrieval_gate(self, tool, params):
+        """Redirect legacy localization to the index without blocking safe degradation."""
+        if not self.retrieval_enabled or self.retrieval_degraded_reason or tool in REPO_QUERY_TOOLS:
+            return None
+        if self.retrieval_required and self._is_legacy_discovery(tool, params):
+            return (
+                "[STRUCTURED RETRIEVAL REQUIRED] Before broad shell/file exploration, call "
+                "repo_search or repo_symbols with terms from the issue. Then use repo_related_files "
+                "or repo_map to narrow candidates. If the index fails, its error will be recorded and "
+                "legacy discovery will be allowed explicitly."
+            )
+        return None
+
+    @staticmethod
+    def _localization_hit(result):
+        if not result.success:
+            return False
+        try:
+            payload = json.loads(result.output)
+            return not payload.get("duplicate") and bool(payload.get("candidates"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return False
 
     def observe(self, tool, params, result, step):
+        if tool in REPO_QUERY_TOOLS:
+            self.retrieval_attempts += 1
+            if tool in REPO_LOCALIZATION_TOOLS and self._localization_hit(result):
+                self.localization_successes += 1
+                self.retrieval_required = False
+                self.discovery_steps_since_retrieval = 0
+            elif "repository index unavailable" in (result.error or "").lower():
+                self.retrieval_degraded_reason = (result.error or "Repository index unavailable")[:300]
+                self.retrieval_required = False
+        elif result.success and self._is_legacy_discovery(tool, params):
+            self.discovery_steps_since_retrieval += 1
+            if self.retrieval_enabled and self.discovery_steps_since_retrieval >= self.retrieval_refresh_steps:
+                self.retrieval_required = True
+                self.retrieval_refreshes += 1
+                self.discovery_steps_since_retrieval = 0
         paths = list(params.get("paths", [])) + ([params["path"]] if params.get("path") else [])
         if result.success and tool in ("search_text", "find_symbol"):
             paths += re.findall(r"^(.+?):\d+:", result.output, flags=re.MULTILINE)[:16]
@@ -97,6 +167,8 @@ class RunContext:
         self.relevant_paths = self.relevant_paths[-16:]
         if result.success and tool in ("file_write", "file_edit", "apply_patch", "edit"):
             self.phase, self.changed = "edit", True
+            self.retrieval_required = False
+            self.discovery_steps_since_retrieval = 0
         elif tool == "test" and result.test_attempted:
             self.phase = "verify" if self.changed else "reproduce"
         elif tool in ("search_text", "find_files", "find_symbol", "file_view", "file_read"):
@@ -112,6 +184,15 @@ class RunContext:
             "phase": self.phase, "related_paths": self.relevant_paths,
             "recent_tool_evidence": self.evidence,
             "child_results": list(self.child_results.values())[-8:],
+            "retrieval_policy": {
+                "enabled": self.retrieval_enabled,
+                "required_before_more_discovery": self.retrieval_required,
+                "attempts": self.retrieval_attempts,
+                "localization_successes": self.localization_successes,
+                "redirects": self.retrieval_redirects,
+                "refreshes": self.retrieval_refreshes,
+                "degraded_reason": self.retrieval_degraded_reason,
+            },
             "last_validation": [{"success": v["success"], "params": v.get("params"),
                                   "command": v.get("command")} for v in self.validation[-2:]],
         }, ensure_ascii=False)

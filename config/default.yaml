@@ -16,6 +16,8 @@ context:
   overview_budget: 1000
   retrieval_result_budget: 1000
   local_map_budget: 1200
+  # Require a fresh structured query after this many legacy reads/searches.
+  retrieval_refresh_steps: 3
   retrieval_weights: {path: 3.0, symbol: 2.0, text: 1.0, pagerank: 1.0}
   history_window: 20
 runtime:

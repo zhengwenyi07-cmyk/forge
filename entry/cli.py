@@ -384,6 +384,7 @@ def run(
         max_output_tokens=config.llm.max_tokens,
         repo_map_strategy=config.context.repo_map_strategy,
         overview_budget=config.context.overview_budget,
+        retrieval_refresh_steps=config.context.retrieval_refresh_steps,
         history_max_messages=config.context.history_window * 2,
         stream=stream,
         stream_callback=_stream_cb if stream else None,

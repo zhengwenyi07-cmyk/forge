@@ -50,6 +50,10 @@ You are an autonomous coding agent. Use the available tools to accomplish the ta
 - After the last edit, use the test tool with a targeted path or explicit command. Report failures accurately.
 - Modification tasks require a new diff and a targeted test attempt before finish is accepted.
 - Commands run in Linux bash. Use repository-relative paths.
+- In retrieval mode, your first localization action MUST be repo_search or repo_symbols before broad file reads or shell searches.
+- Use repo_related_files after confirming a candidate, and repo_map for a bounded local structural view.
+- After several legacy reads, refresh repo_search/repo_symbols using newly discovered names, errors or dependencies.
+- Do not repeatedly bypass the repository index with shell search. If the index reports it is unavailable, state the degradation and continue with bounded legacy tools.
 - When done, call finish. If you truly cannot solve it, call give_up with an explanation
 
 ## Repository
@@ -155,6 +159,7 @@ You may be stuck in an exploration loop. Consider:
 1. Do you have enough context to make a change now?
 2. If yes — make the edit
 3. If no — identify exactly what you still need, get it in one targeted step, then edit
+4. Prefer a fresh repo_search/repo_symbols query using the newest symbol or error evidence
 
 What specific action will move the task forward?\
 """

@@ -36,6 +36,7 @@ agent chat
 
 修复说明、恢复方式和 Flash/Pro 对照评测见 [docs/architecture-repair.md](docs/architecture-repair.md)。
 本次框架修复、个性化 PageRank 地图、配置与验证记录见 [框架与 repo-map 升级说明](docs/framework-repo-map-upgrade-2026-10-29.md)。
+从 Aider 原理、旧 Personalized Repo-map 到当前动态检索架构的面试级讲解见 [Repo-map 实现与面试指南](docs/repo-map-aider-to-forge-interview-guide.md)。
 
 ---
 
@@ -166,8 +167,9 @@ coding-agent/
 - 配置文件一行切换，或 `--model` 参数临时覆盖
 
 **多语言 Repo-map**
-用 tree-sitter 精确提取符号（函数、类、方法），生成 repo 摘要注入 system prompt，
-支持 Python / JavaScript / TypeScript / Go / Rust / Java / C++ / C / Ruby。
+完整路径、符号、import、引用和内容指纹保存在持久化索引中；初始提示只注入极简概览，
+Agent 通过 `repo_search`、`repo_symbols`、`repo_related_files`、`repo_tree` 和局部 `repo_map`
+按需检索。Personalized PageRank 作为动态重排信号，旧静态策略保留用于消融。
 
 **流式输出**
 模型 thought 逐 token 实时打印，工具调用实时显示，体验接近 Claude Code。

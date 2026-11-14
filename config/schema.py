@@ -114,6 +114,7 @@ class ContextConfig:
     overview_budget: int = 1000
     retrieval_result_budget: int = 1000
     local_map_budget: int = 1200
+    retrieval_refresh_steps: int = 3
     retrieval_weights: dict[str, float] = field(default_factory=lambda: {"path": 3.0, "symbol": 2.0, "text": 1.0, "pagerank": 1.0})
 
 
@@ -283,6 +284,7 @@ def _parse(data: dict[str, Any]) -> AppConfig:
         overview_budget=int(context_raw.get("overview_budget", 1000)),
         retrieval_result_budget=int(context_raw.get("retrieval_result_budget", 1000)),
         local_map_budget=int(context_raw.get("local_map_budget", 1200)),
+        retrieval_refresh_steps=int(context_raw.get("retrieval_refresh_steps", 3)),
         retrieval_weights=context_raw.get("retrieval_weights", {"path": 3.0, "symbol": 2.0, "text": 1.0, "pagerank": 1.0}),
     )
 
@@ -313,6 +315,8 @@ def _parse(data: dict[str, Any]) -> AppConfig:
         raise ValueError("Invalid context.overview_budget")
     if not 1 <= context.retrieval_result_budget < context.context_window or not 1 <= context.local_map_budget < context.context_window:
         raise ValueError("Invalid repository query budgets")
+    if not 1 <= context.retrieval_refresh_steps <= 20:
+        raise ValueError("context.retrieval_refresh_steps must be between 1 and 20")
     if set(context.retrieval_weights) != {"path", "symbol", "text", "pagerank"} or any(type(v) not in (int, float) or v < 0 for v in context.retrieval_weights.values()):
         raise ValueError("Invalid context.retrieval_weights")
     return AppConfig(llm=llm, agent=agent, tools=tools, context=context, runtime=runtime)

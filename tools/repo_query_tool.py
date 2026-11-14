@@ -15,11 +15,11 @@ from tools.base import BaseTool, ToolResult
 class RepoQueryTool(BaseTool):
     read_only = True
     OPERATIONS = {
-        "repo_search": ("Search indexed paths, symbols and source terms", {"query": {"type": "string"}, "limit": {"type": "integer"}, "path_prefix": {"type": "string"}}),
-        "repo_symbols": ("Find indexed symbol definitions", {"query": {"type": "string"}, "kind": {"type": "string"}, "limit": {"type": "integer"}}),
-        "repo_related_files": ("Find import and reference neighbors", {"paths": {"type": "array", "items": {"type": "string"}}, "direction": {"type": "string", "enum": ["incoming", "outgoing", "both"]}, "limit": {"type": "integer"}}),
-        "repo_tree": ("Inspect indexed directory structure", {"path": {"type": "string"}, "depth": {"type": "integer"}}),
-        "repo_map": ("Render a local symbol map for named files", {"paths": {"type": "array", "items": {"type": "string"}}, "token_budget": {"type": "integer"}}),
+        "repo_search": ("PRIMARY localization tool: search indexed paths, symbols and source terms before broad file or shell search", {"query": {"type": "string"}, "limit": {"type": "integer"}, "path_prefix": {"type": "string"}}),
+        "repo_symbols": ("PRIMARY symbol locator: find class, function and method definitions before reading files", {"query": {"type": "string"}, "kind": {"type": "string"}, "limit": {"type": "integer"}}),
+        "repo_related_files": ("Expand confirmed candidates through import/reference neighbors after repo_search or repo_symbols", {"paths": {"type": "array", "items": {"type": "string"}}, "direction": {"type": "string", "enum": ["incoming", "outgoing", "both"]}, "limit": {"type": "integer"}}),
+        "repo_tree": ("Inspect a bounded local directory tree from the persistent repository index", {"path": {"type": "string"}, "depth": {"type": "integer"}}),
+        "repo_map": ("Render a token-bounded local symbol map only for selected candidate files", {"paths": {"type": "array", "items": {"type": "string"}}, "token_budget": {"type": "integer"}}),
     }
 
     def __init__(self, operation: str, token_budget: int = 1000, weights=None):
@@ -61,7 +61,10 @@ class RepoQueryTool(BaseTool):
         try:
             if len(json.dumps(params, ensure_ascii=False)) > 1600:
                 raise ValueError("Query parameters exceed 1600 characters")
-            self.index.refresh()
+            try:
+                self.index.refresh()
+            except OSError as exc:
+                return ToolResult(False, "", f"Repository index unavailable: {exc}")
             key = json.dumps([self.operation, params], sort_keys=True)
             if key in self._seen:
                 self.queries.append({"operation": self.operation, "params": params, "duplicate": True})

@@ -241,6 +241,7 @@ class TaskTool(BaseTool):
             sub_agent._config.context_window = self._agent_config.context_window
             sub_agent._config.repo_map_budget = self._agent_config.repo_map_budget
             sub_agent._config.repo_map_strategy = self._agent_config.repo_map_strategy
+            sub_agent._config.retrieval_refresh_steps = self._agent_config.retrieval_refresh_steps
             sub_agent._config.max_output_tokens = self._agent_config.max_output_tokens
 
         # 注册并关联

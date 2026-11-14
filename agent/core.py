@@ -70,7 +70,7 @@ from agent.task import (
 # LLMToolSchema → 工具 JSON Schema 描述
 from llm.base import LLMBackend, LLMMessage, LLMToolSchema
 # ToolRegistry → 工具注册中心，按名称查找并执行已注册的工具
-from tools.base import ToolRegistry
+from tools.base import ToolRegistry, ToolResult
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +99,7 @@ class AgentConfig:
     repo_map_budget: int = 4000
     repo_map_strategy: str = "personalized"
     overview_budget: int = 1000
+    retrieval_refresh_steps: int = 3
     budget_ledger: object = None
     # 历史最大消息条数（第一层裁剪：ConversationHistory 滑动窗口）
     history_max_messages: int = 40
@@ -224,6 +225,11 @@ class Agent:
                             "index_symbols": sum(len(r.definitions) for r in index.files.values()) if index else 0,
                             "cache_hit": getattr(index, "cache_hit", False),
                             "queries": queries, "query_count": len(queries),
+                            "query_attempts": self.context.retrieval_attempts,
+                            "localization_successes": self.context.localization_successes,
+                            "policy_redirects": self.context.retrieval_redirects,
+                            "policy_refreshes": self.context.retrieval_refreshes,
+                            "degraded_reason": self.context.retrieval_degraded_reason,
                             "duplicate_queries": sum(bool(q.get("duplicate")) for q in queries),
                             "truncated_queries": sum(bool(q.get("truncated")) for q in queries),
                             "query_tokens": sum(q.get("tokens", 0) for q in queries),
@@ -317,6 +323,10 @@ class Agent:
                 tool.task = task.description
                 tool._seen.clear()
                 tool.queries.clear()
+        self.context.configure_retrieval(
+            enabled=(self._cfg.repo_map_strategy == "retrieval" and "repo_search" in self._registry.tools),
+            refresh_steps=self._cfg.retrieval_refresh_steps,
+        )
 
         # ── ReAct 主循环计数器 ──────────────────────────────────────
         # 总 token 消耗（累加每次 LLMResponse.total_tokens）
@@ -504,9 +514,16 @@ class Agent:
                 # 通过 ToolRegistry 查找并执行工具。
                 # 工具不存在时返回 error ToolResult（不抛异常），Agent 继续运行。
                 # ToolResult → Observation：包装为 Agent 标准格式
-                if tc.name.startswith("repo_") and tc.name in self._registry.tools:
+                gate_message = self.context.retrieval_gate(tc.name, tc.params)
+                if gate_message:
+                    self.context.retrieval_redirects += 1
+                    result = ToolResult(False, "", gate_message)
+                else:
+                    result = None
+                if result is None and tc.name.startswith("repo_") and tc.name in self._registry.tools:
                     self._registry.tools[tc.name].confirmed_paths = list(self.context.relevant_paths)
-                result = self._registry.execute_tool(tc.name, tc.params)
+                if result is None:
+                    result = self._registry.execute_tool(tc.name, tc.params)
                 if tc.name.startswith("repo_") and tc.name in self._registry.tools:
                     events = self._registry.tools[tc.name].queries
                     if events and "step" not in events[-1]:
