@@ -140,13 +140,13 @@ memory.sqlite3
 
 ```text
 score = lexical×3.0
-      + exact_fingerprint×2.5
+      + exact_fingerprint×1.5
       + path_overlap×2.0
       + symbol_overlap×1.5
       + verified_success×1.5
       + confidence×1.0
       + recency×0.5
-      - stale×1.5
+      - stale×0.75
       - repeat×2.0
 ```
 

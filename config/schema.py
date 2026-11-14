@@ -143,9 +143,9 @@ class MemoryConfig:
     busy_timeout_ms: int = 5000
     auto_resume_chat: bool = True
     weights: dict[str, float] = field(default_factory=lambda: {
-        "lexical": 3.0, "fingerprint": 2.5, "path": 2.0, "symbol": 1.5,
+        "lexical": 3.0, "fingerprint": 1.5, "path": 2.0, "symbol": 1.5,
         "validation": 1.5, "confidence": 1.0, "recency": 0.5,
-        "stale": 1.5, "repeat": 2.0,
+        "stale": 0.75, "repeat": 2.0,
     })
 
 

@@ -243,7 +243,11 @@ class MemoryStore:
 
     @staticmethod
     def _query_terms(query: str) -> list[str]:
-        return list(dict.fromkeys(re.findall(r"[A-Za-z_][A-Za-z0-9_.:/-]{1,63}|[\u4e00-\u9fff]{2,}", query)))[:24]
+        terms = re.findall(r"[A-Za-z_][A-Za-z0-9_.:/-]{1,63}", query)
+        for sequence in re.findall(r"[\u4e00-\u9fff]{2,}", query):
+            terms.append(sequence)
+            terms.extend(sequence[index:index + 2] for index in range(len(sequence) - 1))
+        return list(dict.fromkeys(terms))[:24]
 
     def search_candidates(
         self, repository_id: str, query: str, *, outcomes: tuple[str, ...] = (), limit: int = 50,
@@ -257,7 +261,7 @@ class MemoryStore:
             if outcomes:
                 state += " AND m.outcome IN (" + ",".join("?" for _ in outcomes) + ")"
                 params.extend(outcomes)
-            if terms and self.search_backend == "fts5":
+            if terms and self.search_backend == "fts5" and not re.search(r"[\u4e00-\u9fff]", query):
                 match = " OR ".join('"' + term.replace('"', '""') + '"' for term in terms)
                 sql = f"SELECT m.* FROM memory_fts f JOIN memories m ON m.memory_id=f.memory_id WHERE {state} AND memory_fts MATCH ? ORDER BY bm25(memory_fts), m.updated_at DESC LIMIT ?"
                 params.extend((match, limit))

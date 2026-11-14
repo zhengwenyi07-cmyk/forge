@@ -42,11 +42,12 @@ py-modules = ["run_verification"]
 
 [tool.setuptools.package-data]
 config = ["default.yaml", "swebench-mimo.yaml"]
-evaluation = ["swebench30.json"]
+evaluation = ["swebench30.json", "memory_recall_manifest.json"]
 
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["agent*", "llm*", "tools*", "context*", "entry*", "config*", "multi_agent*", "evaluation*", "memory*"]
+exclude = ["evaluation.runs*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -23,13 +23,13 @@ from memory.store import MemoryStore
 
 DEFAULT_WEIGHTS = {
     "lexical": 3.0,
-    "fingerprint": 2.5,
+    "fingerprint": 1.5,
     "path": 2.0,
     "symbol": 1.5,
     "validation": 1.5,
     "confidence": 1.0,
     "recency": 0.5,
-    "stale": 1.5,
+    "stale": 0.75,
     "repeat": 2.0,
 }
 
@@ -118,7 +118,12 @@ class MemoryManager:
 
     @staticmethod
     def _terms(text: str) -> set[str]:
-        return set(re.findall(r"[a-z_][a-z0-9_.:/-]{1,63}|[\u4e00-\u9fff]{2,}", text.lower()))
+        lowered = text.lower()
+        terms = set(re.findall(r"[a-z_][a-z0-9_.:/-]{1,63}", lowered))
+        for sequence in re.findall(r"[\u4e00-\u9fff]{2,}", lowered):
+            terms.add(sequence)
+            terms.update(sequence[index:index + 2] for index in range(len(sequence) - 1))
+        return terms
 
     def search(
         self, query: str, *, outcomes: tuple[str, ...] = (), paths: list[str] | None = None,
@@ -139,7 +144,10 @@ class MemoryManager:
             state.repository.repository_id,
             " ".join([query_safe, *paths, *symbols]), outcomes=outcomes, limit=max(50, limit * 10),
         )
-        query_terms = self._terms(" ".join([query_safe, *paths, *symbols]))
+        # Explicit path/symbol hints are separate ranking signals. Keeping them out
+        # of lexical overlap makes retrieval ablations interpretable and prevents
+        # the same evidence from being counted twice.
+        query_terms = self._terms(query_safe)
         now = datetime.now(timezone.utc)
         ranked: list[RankedMemory] = []
         missing_file_ids: list[str] = []
@@ -159,7 +167,7 @@ class MemoryManager:
             symbol_score = len(set(symbols) & set(record.related_symbols)) / max(1, len(symbols)) if symbols else 0.0
             exact = float(record.code_fingerprint == state.repository.code_fingerprint)
             stale = not bool(exact)
-            validation = 1.0 if record.test_status == "passed" and not stale else (0.25 if record.test_status == "passed" else 0.0)
+            validation = 1.0 if record.test_status == "passed" else 0.0
             try:
                 age_days = max(0.0, (now - datetime.fromisoformat(record.updated_at)).total_seconds() / 86400)
             except (TypeError, ValueError):

@@ -1,0 +1,5 @@
+prune evaluation/runs
+prune logs
+global-exclude *.sqlite *.sqlite-shm *.sqlite-wal
+global-exclude *.sqlite3 *.sqlite3-shm *.sqlite3-wal
+global-exclude *.local.yaml .env

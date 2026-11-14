@@ -38,4 +38,4 @@ memory:
   retention_days: 180
   busy_timeout_ms: 5000
   auto_resume_chat: true
-  weights: {lexical: 3.0, fingerprint: 2.5, path: 2.0, symbol: 1.5, validation: 1.5, confidence: 1.0, recency: 0.5, stale: 1.5, repeat: 2.0}
+  weights: {lexical: 3.0, fingerprint: 1.5, path: 2.0, symbol: 1.5, validation: 1.5, confidence: 1.0, recency: 0.5, stale: 0.75, repeat: 2.0}
