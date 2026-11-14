@@ -25,6 +25,27 @@ class RankedRepoMap:
     def cache_key(self, task="", mentioned_paths=(), budget=4000, strategy="personalized"):
         return (str(self._root), self.index.refresh(), task, tuple(mentioned_paths), budget, strategy)
 
+    def overview(self, task="", budget=1000):
+        """Compact orientation only; deeper evidence is available through repo_* tools."""
+        self.index.refresh()
+        files = self.index.files
+        directories = Counter(p.split("/")[0] for p in files if "/" in p)
+        terms = words(task)
+        candidates = sorted(files, key=lambda p: (-len(terms & words(p)), p))
+        lines = ["Repository overview (query repo_search/repo_symbols/repo_related_files/repo_tree/repo_map for details):",
+                 "Top-level directories: " + ", ".join(p for p, _ in directories.most_common(16)),
+                 "Entry points: " + ", ".join(p for p in files if p.count("/") <= 1 and Path(p).name in ("main.py", "cli.py", "app.py", "pyproject.toml", "README.md"))[:300],
+                 "Issue candidates: " + ", ".join(candidates[:8])]
+        output = ""
+        for line in lines:
+            if estimate_tokens(output + line) > budget:
+                break
+            output += line + "\n"
+        self.last_diagnostics = {"strategy": "retrieval", "index_version": self.index.version,
+                                 "files": len(files), "symbols": sum(len(r.definitions) for r in files.values()),
+                                 "estimated_tokens": estimate_tokens(output), "truncated": len(output.splitlines()) < len(lines)}
+        return output
+
     def build(self, budget=4000, task="", mentioned_paths=(), strategy="personalized"):
         if strategy not in ("personalized", "global", "lexical", "legacy"):
             raise ValueError("Unknown repo-map strategy")

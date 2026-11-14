@@ -197,19 +197,19 @@ class TestChatEdgeCases:
         build_count = 0
 
         from context import repo_map as rm_module
-        original_build = rm_module.RepoMap.build
+        original_build = rm_module.RepoMap.overview
 
-        def counting_build(self, budget=8000, **kwargs):
+        def counting_build(self, task="", budget=1000):
             nonlocal build_count
             build_count += 1
-            return original_build(self, budget, **kwargs)
+            return original_build(self, task, budget)
 
         from unittest.mock import patch
         script = [
             Action(ActionType.FINISH, "r1", message="done1"),
             Action(ActionType.FINISH, "r2", message="done2"),
         ]
-        with patch.object(rm_module.RepoMap, "build", counting_build):
+        with patch.object(rm_module.RepoMap, "overview", counting_build):
             session = make_session(MockBackend(script), registry, cfg, tmp_path)
             session.run_round("round 1")
             session.run_round("round 2")

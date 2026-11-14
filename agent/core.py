@@ -98,6 +98,7 @@ class AgentConfig:
     max_output_tokens: int = 8192
     repo_map_budget: int = 4000
     repo_map_strategy: str = "personalized"
+    overview_budget: int = 1000
     budget_ledger: object = None
     # 历史最大消息条数（第一层裁剪：ConversationHistory 滑动窗口）
     history_max_messages: int = 40
@@ -207,6 +208,29 @@ class Agent:
         if task.task_type == "modify":
             result.patch = result.patch or self._get_git_diff(task.repo_path)
         result.validation = list(self.context.validation)
+        query_tools = [self._registry.tools[name] for name in ("repo_search", "repo_symbols", "repo_related_files", "repo_tree", "repo_map") if name in self._registry.tools]
+        queries = [event for tool in query_tools for event in tool.queries]
+        actions = log.get_actions()
+        read_files = [a.tool_call.params.get("path") for a in actions if a.tool_call and a.tool_call.name in ("file_view", "file_read")]
+        import re
+        changed_files = re.findall(r"^diff --git a/(.*?) b/", result.patch or "", flags=re.MULTILINE)
+        discoveries = [(q.get("step"), rank, row["path"]) for q in queries
+                       for rank, row in enumerate(q.get("candidates", []), 1)
+                       if row.get("path") in changed_files]
+        first_discovery = min(discoveries, key=lambda item: (item[0] or 999, item[1])) if discoveries else None
+        index = getattr(getattr(self, "_repo_map", None), "index", None)
+        result.retrieval = {"index_seconds": getattr(index, "build_seconds", 0),
+                            "index_files": len(index.files) if index else 0,
+                            "index_symbols": sum(len(r.definitions) for r in index.files.values()) if index else 0,
+                            "cache_hit": getattr(index, "cache_hit", False),
+                            "queries": queries, "query_count": len(queries),
+                            "duplicate_queries": sum(bool(q.get("duplicate")) for q in queries),
+                            "truncated_queries": sum(bool(q.get("truncated")) for q in queries),
+                            "query_tokens": sum(q.get("tokens", 0) for q in queries),
+                            "read_files": read_files, "changed_files": changed_files,
+                            "irrelevant_reads": sum(p not in changed_files for p in read_files),
+                            "first_changed_file_step": first_discovery[0] if first_discovery else None,
+                            "first_changed_file_rank": first_discovery[1] if first_discovery else None}
         result.own_tokens = ledger.usage_for(task.task_id)
         result.total_tokens = result.own_tokens if self._cfg.budget_ledger else ledger.total
         if result.validation:
@@ -286,6 +310,13 @@ class Agent:
             tool = self._registry.tools.get(name)
             if tool is not None:
                 tool._repo_index = repo_map.index
+        for name in ("repo_search", "repo_symbols", "repo_related_files", "repo_tree", "repo_map"):
+            tool = self._registry.tools.get(name)
+            if tool is not None:
+                tool.index = repo_map.index
+                tool.task = task.description
+                tool._seen.clear()
+                tool.queries.clear()
 
         # ── ReAct 主循环计数器 ──────────────────────────────────────
         # 总 token 消耗（累加每次 LLMResponse.total_tokens）
@@ -473,7 +504,15 @@ class Agent:
                 # 通过 ToolRegistry 查找并执行工具。
                 # 工具不存在时返回 error ToolResult（不抛异常），Agent 继续运行。
                 # ToolResult → Observation：包装为 Agent 标准格式
+                if tc.name.startswith("repo_") and tc.name in self._registry.tools:
+                    self._registry.tools[tc.name].confirmed_paths = list(self.context.relevant_paths)
                 result = self._registry.execute_tool(tc.name, tc.params)
+                if tc.name.startswith("repo_") and tc.name in self._registry.tools:
+                    events = self._registry.tools[tc.name].queries
+                    if events and "step" not in events[-1]:
+                        events[-1]["step"] = step
+                        from context.token_budget import estimate_tokens
+                        events[-1]["tokens"] = estimate_tokens(result.output)
                 self.context.observe(tc.name, tc.params, result, step)
                 observation = result.to_observation(tc.name)
                 if tc.name == "test" and result.test_attempted and (tc.params.get("path") or tc.params.get("command")):
@@ -644,10 +683,13 @@ class Agent:
         map_budget = min(self._cfg.repo_map_budget, self._cfg.context_window // 4)
         selection_key = repo_map.cache_key(task_description, paths, map_budget, self._cfg.repo_map_strategy)
         if not hasattr(self, "_repo_map_cache") or selection_key != getattr(self, "_repo_map_selection_key", None):
-            self._repo_map_cache = repo_map.build(
-                budget=map_budget, task=task_description, mentioned_paths=paths,
-                strategy=self._cfg.repo_map_strategy,
-            )
+            if self._cfg.repo_map_strategy == "retrieval":
+                self._repo_map_cache = repo_map.overview(task_description, budget=self._cfg.overview_budget)
+            else:
+                self._repo_map_cache = repo_map.build(
+                    budget=map_budget, task=task_description, mentioned_paths=paths,
+                    strategy=self._cfg.repo_map_strategy,
+                )
             self._repo_map_selection_key = selection_key
 
         # 渲染 system prompt：将 repo-map 摘要注入 {repo_summary} 占位符

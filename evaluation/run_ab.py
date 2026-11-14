@@ -127,6 +127,10 @@ def run_trial(row, model, cfg, settings, image, repos_dir, output, fingerprint, 
     trial.mkdir(parents=True, exist_ok=True)
     result_file = trial / "result.json"
     effective = {"context_window": cfg.context.context_window, "repo_map_budget": cfg.context.repo_map_budget,
+                 "overview_budget": cfg.context.overview_budget,
+                 "retrieval_result_budget": cfg.context.retrieval_result_budget,
+                 "local_map_budget": cfg.context.local_map_budget,
+                 "retrieval_weights": cfg.context.retrieval_weights,
                  "repo_map_strategy": cfg.context.repo_map_strategy, "endpoint": cfg.llm.base_url,
                  "tools": {"shell_timeout": cfg.tools.shell.timeout, "shell_output": cfg.tools.shell.max_output_tokens,
                            "file_view_lines": cfg.tools.file.max_view_lines}}
@@ -188,10 +192,11 @@ def run_trial(row, model, cfg, settings, image, repos_dir, output, fingerprint, 
             registry = _build_registry(cfg, runtime=runtime)
             agent = Agent(backend, registry, AgentConfig(budget_tokens=settings["budget_tokens"], history_max_messages=40,
                           context_window=cfg.context.context_window, repo_map_budget=cfg.context.repo_map_budget,
-                          repo_map_strategy=cfg.context.repo_map_strategy, max_output_tokens=settings["max_tokens"], stream=False), runtime=runtime)
+                          repo_map_strategy=cfg.context.repo_map_strategy, overview_budget=cfg.context.overview_budget,
+                          max_output_tokens=settings["max_tokens"], stream=False), runtime=runtime)
             with EventLog.create(task, log_dir=str(trial / "logs")) as log:
                 result = agent.run(task, log)
-            record.update(status="infrastructure_error" if result.error else result.status.value, tokens=result.total_tokens, validation=result.validation, summary=result.summary.replace(cfg.llm.api_key, "[REDACTED]"), patch=capture_patch(str(repo), base_ref=base_commit))
+            record.update(status="infrastructure_error" if result.error else result.status.value, tokens=result.total_tokens, validation=result.validation, retrieval=result.retrieval, summary=result.summary.replace(cfg.llm.api_key, "[REDACTED]"), patch=capture_patch(str(repo), base_ref=base_commit))
         except KeyboardInterrupt:
             interrupted = True
             record.update(status="interrupted", error="Interrupted; saved checkpoint may be resumed")
@@ -237,7 +242,7 @@ def main():
                         help="Run only this manifest model; repeat to select multiple models")
     parser.add_argument("--reuse-trials-from", action="append", type=Path, default=[],
                         help="Import matching completed trials from another run directory")
-    parser.add_argument("--map-strategy", choices=("legacy", "lexical", "global", "personalized"), help="Fix one map strategy for both models; use separate output directories for map ablations")
+    parser.add_argument("--map-strategy", choices=("retrieval", "legacy", "lexical", "global", "personalized"), help="Select repository context strategy")
     parser.add_argument("--repo-map-budget", type=int, help="Fix the same map token budget for both models")
     parser.add_argument("--unlimited-run-tokens", action="store_true",
                         help="Disable the cumulative per-task token cap; max_steps still prevents infinite loops")

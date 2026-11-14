@@ -430,6 +430,7 @@ class RunResult:
     artifact_error: str | None = None
     recovery_worktree: str | None = None
     usage_complete: bool = True
+    retrieval: dict[str, Any] = field(default_factory=dict)
 
     def is_success(self) -> bool:
         return self.status == RunStatus.SUCCESS

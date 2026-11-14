@@ -5,6 +5,10 @@ import ast
 import fnmatch
 import hashlib
 import os
+import json
+import tempfile
+import time
+import uuid
 import re
 import subprocess
 from collections import Counter, defaultdict
@@ -13,6 +17,7 @@ from pathlib import Path
 
 SKIP_DIRS = {".git", ".venv", "venv", "__pycache__", "node_modules", ".pytest_cache", ".mypy_cache", "dist", "build"}
 SOURCE_EXTENSIONS = {".py", ".js", ".ts", ".tsx", ".go", ".rs", ".java", ".cpp", ".c", ".rb"}
+INDEX_SCHEMA = 2
 
 
 @dataclass
@@ -33,6 +38,10 @@ class FileRecord:
     references: Counter = field(default_factory=Counter)
     attributes: Counter = field(default_factory=Counter)
     parse_status: str = "metadata"
+    language: str = ""
+    content_hash: str = ""
+    summary: str = ""
+    terms: set[str] = field(default_factory=set)
 
 
 def repository_files(root: Path):
@@ -131,8 +140,46 @@ class RepoIndex:
         self._cache = {}
         self.parse_count = 0
         self.excluded_paths = set()
+        self.cache_hit = False
+        self.build_seconds = 0.0
+        cache_root = Path(tempfile.gettempdir()) / "forge-repo-index"
+        self.snapshot_path = cache_root / (hashlib.sha256(str(self.root).encode()).hexdigest() + ".json")
+        self._load_snapshot()
+
+    def _load_snapshot(self):
+        try:
+            data = json.loads(self.snapshot_path.read_text(encoding="utf-8"))
+            if data.get("schema") != INDEX_SCHEMA or data.get("root") != str(self.root):
+                return
+            records = {}
+            for path, raw in data["files"].items():
+                records[path] = FileRecord(path, raw["size"],
+                    [Definition(**definition) for definition in raw["definitions"]],
+                    raw["imports"], Counter(raw["references"]),
+                    Counter({tuple(key.split("\u0000", 1)): value for key, value in raw["attributes"].items()}),
+                    raw["parse_status"], raw.get("language", ""), raw.get("content_hash", ""), raw.get("summary", ""), set(raw.get("terms", [])))
+            self._cache = {(path, record.content_hash): record for path, record in records.items()}
+            self.cache_hit = True
+        except (OSError, ValueError, KeyError, TypeError):
+            self.cache_hit = False
+
+    def _save_snapshot(self):
+        data = {"schema": INDEX_SCHEMA, "root": str(self.root), "version": self.version,
+                "files": {path: {"size": r.size, "definitions": [vars(d) for d in r.definitions],
+                "imports": r.imports, "references": dict(r.references),
+                "attributes": {"\u0000".join(key): value for key, value in r.attributes.items()},
+                "parse_status": r.parse_status, "language": r.language,
+                "content_hash": r.content_hash, "summary": r.summary, "terms": sorted(r.terms)} for path, r in self.files.items()}}
+        try:
+            self.snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = self.snapshot_path.with_name(self.snapshot_path.name + "." + uuid.uuid4().hex + ".tmp")
+            temporary.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            os.replace(temporary, self.snapshot_path)
+        except OSError:
+            pass
 
     def refresh(self):
+        started = time.monotonic()
         records, keys = {}, []
         for absolute in repository_files(self.root):
             try:
@@ -143,17 +190,22 @@ class RepoIndex:
                     continue
                 size = absolute.stat().st_size
                 is_source = absolute.suffix.lower() in SOURCE_EXTENSIONS and size <= 500_000
-                content = absolute.read_bytes() if is_source else b""
-                fingerprint = hashlib.sha256(content).hexdigest() if is_source else str(size)
+                content = absolute.read_bytes() if size <= 500_000 else b""
+                fingerprint = hashlib.sha256(content).hexdigest() if size <= 500_000 else str(size)
                 key = (path, fingerprint)
                 record = self._cache.get(key)
                 if record is None:
-                    record = FileRecord(path, size)
+                    record = FileRecord(path, size, language=absolute.suffix.lower().lstrip("."), content_hash=fingerprint)
                     if is_source:
                         self._parse(content.decode("utf-8-sig", errors="replace"), record)
+                    if size <= 500_000 and b"\0" not in content:
+                        record.terms = set(re.findall(r"[a-z][a-z0-9_]*", content.decode("utf-8", errors="replace").lower()))
                     elif size > 500_000:
                         record.parse_status = "large_file_metadata"
                     self._cache[key] = record
+                record.language = absolute.suffix.lower().lstrip(".")
+                record.content_hash = fingerprint
+                record.summary = record.definitions[0].signature if record.definitions else Path(path).name
                 records[path] = record
                 keys.append(key)
             except (OSError, ValueError):
@@ -164,6 +216,8 @@ class RepoIndex:
             self.edges = self._graph(records)
             self.version = version
             self._cache = {key: self._cache[key] for key in keys}
+            self._save_snapshot()
+        self.build_seconds += time.monotonic() - started
         return self.version
 
     def _parse(self, content, record):

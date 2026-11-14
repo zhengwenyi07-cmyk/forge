@@ -12,7 +12,11 @@ agent:
 context:
   context_window: 32768
   repo_map_budget: 4000
-  repo_map_strategy: personalized
+  repo_map_strategy: retrieval
+  overview_budget: 1000
+  retrieval_result_budget: 1000
+  local_map_budget: 1200
+  retrieval_weights: {path: 3.0, symbol: 2.0, text: 1.0, pagerank: 1.0}
   history_window: 20
 runtime:
   image: forge-runtime:py311

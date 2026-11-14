@@ -357,6 +357,7 @@ def run_on_issue(
         repo_map_budget=config.context.repo_map_budget,
         max_output_tokens=config.llm.max_tokens,
         repo_map_strategy=config.context.repo_map_strategy,
+        overview_budget=config.context.overview_budget,
     )
     agent = Agent(backend, registry, agent_config, runtime=runtime)
 

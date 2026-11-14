@@ -110,7 +110,11 @@ class ContextConfig:
     repo_map_budget: int = 4_000   # 单次请求中 repo-map 的最大估算 token 数
     history_window: int = 20       # 保留最近 N 轮对话历史（条数维度，传给 ConversationHistory）
     context_window: int = 32_768
-    repo_map_strategy: str = "personalized"
+    repo_map_strategy: str = "retrieval"
+    overview_budget: int = 1000
+    retrieval_result_budget: int = 1000
+    local_map_budget: int = 1200
+    retrieval_weights: dict[str, float] = field(default_factory=lambda: {"path": 3.0, "symbol": 2.0, "text": 1.0, "pagerank": 1.0})
 
 
 @dataclass
@@ -275,7 +279,11 @@ def _parse(data: dict[str, Any]) -> AppConfig:
         repo_map_budget=int(context_raw.get("repo_map_budget", 4_000)),
         history_window=int(context_raw.get("history_window", 20)),
         context_window=int(context_raw.get("context_window", 32_768)),
-        repo_map_strategy=context_raw.get("repo_map_strategy", "personalized"),
+        repo_map_strategy=context_raw.get("repo_map_strategy", "retrieval"),
+        overview_budget=int(context_raw.get("overview_budget", 1000)),
+        retrieval_result_budget=int(context_raw.get("retrieval_result_budget", 1000)),
+        local_map_budget=int(context_raw.get("local_map_budget", 1200)),
+        retrieval_weights=context_raw.get("retrieval_weights", {"path": 3.0, "symbol": 2.0, "text": 1.0, "pagerank": 1.0}),
     )
 
     runtime_raw = data.get("runtime", {})
@@ -299,8 +307,14 @@ def _parse(data: dict[str, Any]) -> AppConfig:
         raise ValueError("context.context_window must leave room for input after llm.max_tokens")
     if not 0 <= context.repo_map_budget < context.context_window:
         raise ValueError("context.repo_map_budget must be nonnegative and smaller than context_window")
-    if context.repo_map_strategy not in ("personalized", "global", "lexical", "legacy"):
+    if context.repo_map_strategy not in ("retrieval", "personalized", "global", "lexical", "legacy"):
         raise ValueError("Unknown context.repo_map_strategy")
+    if not 1 <= context.overview_budget < context.context_window:
+        raise ValueError("Invalid context.overview_budget")
+    if not 1 <= context.retrieval_result_budget < context.context_window or not 1 <= context.local_map_budget < context.context_window:
+        raise ValueError("Invalid repository query budgets")
+    if set(context.retrieval_weights) != {"path", "symbol", "text", "pagerank"} or any(type(v) not in (int, float) or v < 0 for v in context.retrieval_weights.values()):
+        raise ValueError("Invalid context.retrieval_weights")
     return AppConfig(llm=llm, agent=agent, tools=tools, context=context, runtime=runtime)
 
 

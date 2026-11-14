@@ -113,6 +113,7 @@ def _build_registry(cfg, confirm_callback=None, runtime=None,
     from tools.search_tool import FindFilesTool, FindSymbolTool, SearchTextTool
     from tools.shell_tool import ShellTool
     from tools.test_tool import PytestTool
+    from tools.repo_query_tool import RepoQueryTool
 
     registry = (
         ToolRegistry(confirm_callback=confirm_callback)
@@ -134,6 +135,9 @@ def _build_registry(cfg, confirm_callback=None, runtime=None,
         .register(GitAddTool(runtime=runtime))
         .register(GitCommitTool(runtime=runtime))
     )
+    for operation in RepoQueryTool.OPERATIONS:
+        budget = cfg.context.local_map_budget if operation == "repo_map" else cfg.context.retrieval_result_budget
+        registry.register(RepoQueryTool(operation, token_budget=budget, weights=cfg.context.retrieval_weights))
 
     # 注册 TaskTool（multi-agent 入口）
     if task_registry and backend and repo_path:
@@ -379,6 +383,7 @@ def run(
         repo_map_budget=config.context.repo_map_budget,
         max_output_tokens=config.llm.max_tokens,
         repo_map_strategy=config.context.repo_map_strategy,
+        overview_budget=config.context.overview_budget,
         history_max_messages=config.context.history_window * 2,
         stream=stream,
         stream_callback=_stream_cb if stream else None,

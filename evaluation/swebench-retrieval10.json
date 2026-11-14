@@ -1,0 +1,19 @@
+{
+  "schema_version": 2,
+  "seed": 20261114,
+  "selection_algorithm": "Sort frozen 30 by SHA256('forge-retrieval-10-v1:' + instance_id); take first task from each distinct repository until 10 repositories are selected.",
+  "dataset_sha256": "51f5112b9be08207f113b8e6cb012e50e3d085663d5233ebef6f9c9c855e9259",
+  "tasks": [
+    {"instance_id":"pytest-dev__pytest-7490","repo":"pytest-dev/pytest","base_commit":"7f7a36478abe7dd1fa993b115d22606aa0e35e88"},
+    {"instance_id":"astropy__astropy-14995","repo":"astropy/astropy","base_commit":"b16c7d12ccbc7b2d20364b89fb44285bcbfede54"},
+    {"instance_id":"sympy__sympy-14774","repo":"sympy/sympy","base_commit":"8fc63c2d71752389a44367b8ef4aba8a91af6a45"},
+    {"instance_id":"scikit-learn__scikit-learn-25570","repo":"scikit-learn/scikit-learn","base_commit":"cd25abee0ad0ac95225d4a9be8948eff69f49690"},
+    {"instance_id":"matplotlib__matplotlib-23563","repo":"matplotlib/matplotlib","base_commit":"149a0398b391cfc4eddb5e659f50b3c66f32ea65"},
+    {"instance_id":"mwaskom__seaborn-3010","repo":"mwaskom/seaborn","base_commit":"0f5a013e2cf43562deec3b879458e59a73853813"},
+    {"instance_id":"django__django-13448","repo":"django/django","base_commit":"7b9596b974fb0ad1868b10c8c2174e10b72be403"},
+    {"instance_id":"pylint-dev__pylint-7114","repo":"pylint-dev/pylint","base_commit":"397c1703e8ae6349d33f7b99f45b2ccaf581e666"},
+    {"instance_id":"pallets__flask-4045","repo":"pallets/flask","base_commit":"d8c37f43724cd9fb0870f77877b7c4c7e38a19e0"},
+    {"instance_id":"psf__requests-3362","repo":"psf/requests","base_commit":"36453b95b13079296776d11b09cab2567ea3e703"}
+  ],
+  "settings": {"max_steps":40,"budget_tokens":80000,"max_tokens":8192,"temperature":0,"multi_agent":false,"models":["mimo-v2.6-flash"]}
+}
