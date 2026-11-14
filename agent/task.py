@@ -191,6 +191,9 @@ class Task:
     budget_tokens: int | None = 80_000
     # Explicit contract: analysis tasks can finish without a patch or tests.
     task_type: str = "modify"
+    # Optional provenance for sub-agent episodic memory.
+    parent_task_id: str | None = None
+    agent_type: str | None = None
 
     def __post_init__(self):
         if self.task_type not in ("modify", "read_only"):
@@ -431,6 +434,7 @@ class RunResult:
     recovery_worktree: str | None = None
     usage_complete: bool = True
     retrieval: dict[str, Any] = field(default_factory=dict)
+    memory: dict[str, Any] = field(default_factory=dict)
 
     def is_success(self) -> bool:
         return self.status == RunStatus.SUCCESS

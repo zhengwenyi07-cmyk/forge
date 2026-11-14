@@ -217,7 +217,9 @@ class ChatSession:
     - repo_map 缓存（换 repo 时自动失效）
     """
 
-    def __init__(self, backend, registry, config, repo_path: str, log_dir: str, confirm_callback=None, task_registry=None, runtime=None, task_type="modify") -> None:
+    def __init__(self, backend, registry, config, repo_path: str, log_dir: str, confirm_callback=None,
+                 task_registry=None, runtime=None, task_type="modify", session_id: str = "default",
+                 resume: bool | None = None) -> None:
         from agent.core import Agent, AgentConfig
         from context.history import ConversationHistory
 
@@ -225,6 +227,7 @@ class ChatSession:
         self.log_dir = log_dir
         self.config = config
         self.task_type = task_type
+        self.session_id = session_id
         self._confirm_callback = confirm_callback
 
         # ── 流式回调闭包 ──────────────────────────────────────────────
@@ -301,6 +304,23 @@ class ChatSession:
         self.total_tokens = 0
         self.total_steps = 0
         self.round_count = 0
+        self.session_restored = False
+        self.checkpoint_error = None
+        self._memory_manager = getattr(self.agent, "_memory_manager", None)
+        should_resume = config.memory.auto_resume_chat if resume is None else resume
+        if should_resume and self._memory_manager is not None:
+            try:
+                checkpoint = self._memory_manager.load_session(self.session_id, self.repo_path)
+                if checkpoint:
+                    self._shared_history = ConversationHistory.from_dicts(
+                        checkpoint.history, max_messages=config.context.history_window * 2,
+                    )
+                    self.round_count = checkpoint.round_count
+                    self.total_tokens = checkpoint.total_tokens
+                    self.total_steps = checkpoint.total_steps
+                    self.session_restored = True
+            except Exception as exc:
+                self.checkpoint_error = self._memory_manager.safe_error("checkpoint restore failed", exc)
 
     def run_round(self, user_input: str) -> bool:
         """
@@ -321,6 +341,8 @@ class ChatSession:
 
         # 把用户输入追加到共享 history（下一轮 LLM 调用时能看到此输入）
         self._shared_history.add(LLMMessage(role="user", content=user_input))
+        # Persist the pending user turn before model/tool work so a crash is resumable.
+        self.save_checkpoint()
 
         # 构建这轮的 Task。
         # repo_path 固定（整个 session 不变），description 用用户当轮输入。
@@ -358,6 +380,7 @@ class ChatSession:
                 role="assistant",
                 content=f"[Round {self.round_count} complete]\n{result.summary}",
             ))
+        self.save_checkpoint()
 
         # 流式输出结束后打换行，重置 readline 的行状态（避免下一轮提示符位置错乱）
         import sys as _sys
@@ -373,6 +396,23 @@ class ChatSession:
         ))
 
         return result.is_success() or result.status.value == "gave_up"
+
+    def save_checkpoint(self) -> None:
+        """Atomically persist the bounded conversation state outside the workspace."""
+        if self._memory_manager is None:
+            return
+        try:
+            self._memory_manager.save_session(
+                self.session_id, self.repo_path, self._shared_history.to_dicts(),
+                self.round_count, self.total_tokens, self.total_steps,
+            )
+            self.checkpoint_error = None
+        except Exception as exc:
+            self.checkpoint_error = self._memory_manager.safe_error("checkpoint save failed", exc)
+
+    def clear_history(self) -> None:
+        self._shared_history.clear_except_first()
+        self.save_checkpoint()
 
     def _run_with_live_print(self, task, log):
         """

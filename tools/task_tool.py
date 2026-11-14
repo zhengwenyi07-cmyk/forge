@@ -215,6 +215,8 @@ class TaskTool(BaseTool):
             max_steps=max_steps,
             budget_tokens=40_000,
             task_type="modify" if agent_type == "fork" else "read_only",
+            parent_task_id=getattr(getattr(self, "_run_context", None), "task_id", None),
+            agent_type=agent_type,
         )
 
         # 获取父 Agent 的当前上下文（用于子 Agent 缓存命中）

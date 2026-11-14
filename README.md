@@ -37,6 +37,7 @@ agent chat
 修复说明、恢复方式和 Flash/Pro 对照评测见 [docs/architecture-repair.md](docs/architecture-repair.md)。
 本次框架修复、个性化 PageRank 地图、配置与验证记录见 [框架与 repo-map 升级说明](docs/framework-repo-map-upgrade-2026-10-29.md)。
 从 Aider 原理、旧 Personalized Repo-map 到当前动态检索架构的面试级讲解见 [Repo-map 实现与面试指南](docs/repo-map-aider-to-forge-interview-guide.md)。
+长期记忆的 ADR、安全边界和演进方案见 [Forge Memory 架构设计](docs/forge-agent-memory-architecture.md)，面试讲解见 [Forge Memory 面试指南](docs/forge-memory-interview-guide.md)。
 
 ---
 
@@ -51,6 +52,7 @@ agent chat                            # 当前目录
 agent chat --repo /path/to/project   # 指定目录
 agent chat --model deepseek-v4-pro   # 切换模型
 agent chat --sandbox                  # Docker 沙箱
+agent chat --session-id parser-work  # 恢复同一仓库的持久化会话
 ```
 
 对话内命令：`/exit` 退出、`/stats` 查看统计、`/clear` 清空历史、`/help` 帮助
@@ -96,8 +98,15 @@ agent:
 context:
   context_window: 32768   # 单次请求窗口，独立于累计运行预算
   repo_map_budget: 4000   # 地图的估算 token 上限
-  repo_map_strategy: personalized  # personalized | global | lexical | legacy
+  repo_map_strategy: retrieval  # retrieval | personalized | global | lexical | legacy
   history_window: 20      # 保留历史轮数
+
+memory:
+  enabled: true
+  path: ""                  # 默认写入用户 state 目录，不进入目标仓库
+  initial_token_budget: 600
+  search_token_budget: 800
+  max_results: 5
 ```
 
 `read_only` 在工具注册表中限制写入、Shell、测试和 fork。启用 `--confirm` 后，文件编辑、测试、Git 写入及非简单只读 Shell 统一经过确认。
@@ -141,6 +150,12 @@ coding-agent/
 │   ├── token_budget.py # Token 预算分配与裁剪
 │   └── history.py      # 对话历史滑动窗口
 │
+├── memory/             # 持久化会话与跨任务情景记忆
+│   ├── store.py        # SQLite/FTS5 schema、事务、checkpoint
+│   ├── manager.py      # 排名、预算、失效、写入策略与指标
+│   ├── identity.py     # 仓库身份与代码指纹
+│   └── security.py     # secret 净化与不可信内容隔离
+│
 ├── entry/              # 入口层
 │   ├── cli.py          # Click CLI（run / chat / log 子命令）
 │   ├── chat.py         # ChatSession，跨轮持久化历史
@@ -150,7 +165,7 @@ coding-agent/
 │   ├── default.yaml    # 默认配置
 │   └── schema.py       # 配置加载与校验
 │
-├── tests/              # 376 个测试，覆盖所有模块
+├── tests/              # 500+ 个测试，覆盖所有模块
 ├── smoke_test.py       # 端到端联通验证
 ├── quicksort_task.py   # 示例任务脚本
 └── USAGE.md            # 完整使用教程
@@ -170,6 +185,11 @@ coding-agent/
 完整路径、符号、import、引用和内容指纹保存在持久化索引中；初始提示只注入极简概览，
 Agent 通过 `repo_search`、`repo_symbols`、`repo_related_files`、`repo_tree` 和局部 `repo_map`
 按需检索。Personalized PageRank 作为动态重排信号，旧静态策略保留用于消融。
+
+**版本感知的长期记忆**
+ChatSession 通过 SQLite checkpoint 跨进程恢复；任务结果以结构化 episodic memory 保存。
+Agent 在任务开始或通过 `memory_search` / `memory_get` 按需检索，结果受独立 Token 预算约束，
+并始终作为不可信历史证据注入。代码指纹变化会降权，相关文件消失会失效；第一版不调用 embedding 模型。
 
 **流式输出**
 模型 thought 逐 token 实时打印，工具调用实时显示，体验接近 Claude Code。

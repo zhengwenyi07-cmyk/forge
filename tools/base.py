@@ -127,6 +127,8 @@ class ToolRegistry:
     def for_task(self, task_type):
         scoped = ToolRegistry(self.confirm_callback, self.read_only or task_type == "read_only")
         scoped._tools = dict(self._tools)
+        if hasattr(self, "memory_manager"):
+            scoped.memory_manager = self.memory_manager
         return scoped
 
     def _allowed(self, tool, params):

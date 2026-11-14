@@ -71,6 +71,8 @@ def build_sub_agent_registry(
     """
     bl = blacklist or SUB_AGENT_BLACKLIST
     sub_registry = ToolRegistry(parent_registry.confirm_callback, parent_registry.read_only)
+    if hasattr(parent_registry, "memory_manager"):
+        sub_registry.memory_manager = parent_registry.memory_manager
 
     for name, tool in parent_registry._tools.items():
         # 黑名单过滤（所有子 Agent 都不能用的工具）

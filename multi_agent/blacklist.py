@@ -32,6 +32,8 @@ EXPLORE_TOOL_NAMES: frozenset[str] = frozenset({
     "find_symbol",
     "file_read",
     "file_view",
+    "memory_search",
+    "memory_get",
 })
 
 # ---------------------------------------------------------------------------
@@ -46,4 +48,6 @@ REVIEW_TOOL_NAMES: frozenset[str] = frozenset({
     "file_view",
     "git_status",
     "git_diff",
+    "memory_search",
+    "memory_get",
 })

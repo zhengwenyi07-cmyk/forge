@@ -62,7 +62,7 @@ class ConversationHistory:
     def from_dicts(cls, dicts: list[dict], max_messages: int = 40) -> "ConversationHistory":
         """从 dict 列表恢复（断点续跑时用）。"""
         h = cls(max_messages=max_messages)
-        h._messages = [LLMMessage(**d) for d in dicts]
+        h.add_many([LLMMessage(**d) for d in dicts])
         return h
 
     @property

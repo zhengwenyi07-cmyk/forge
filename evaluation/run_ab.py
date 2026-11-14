@@ -115,7 +115,7 @@ class ProgressTracker:
 def code_fingerprint(root: Path):
     git = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
     files = {}
-    for directory in ("agent", "tools", "context", "llm", "entry", "multi_agent", "evaluation", "config"):
+    for directory in ("agent", "tools", "context", "llm", "entry", "multi_agent", "evaluation", "config", "memory"):
         for path in sorted((root / directory).glob("*.py")):
             files[path.relative_to(root).as_posix()] = digest(path.read_bytes())
     return {"commit": git, "source_sha256": digest(json.dumps(files, sort_keys=True).encode())}
@@ -132,6 +132,12 @@ def run_trial(row, model, cfg, settings, image, repos_dir, output, fingerprint, 
                  "local_map_budget": cfg.context.local_map_budget,
                  "retrieval_weights": cfg.context.retrieval_weights,
                  "repo_map_strategy": cfg.context.repo_map_strategy, "endpoint": cfg.llm.base_url,
+                 "memory": {"enabled": cfg.memory.enabled,
+                            "initial_token_budget": cfg.memory.initial_token_budget,
+                            "search_token_budget": cfg.memory.search_token_budget,
+                            "max_results": cfg.memory.max_results,
+                            "retention_days": cfg.memory.retention_days,
+                            "weights": cfg.memory.weights},
                  "tools": {"shell_timeout": cfg.tools.shell.timeout, "shell_output": cfg.tools.shell.max_output_tokens,
                            "file_view_lines": cfg.tools.file.max_view_lines}}
     identity = {"model": model, "instance_id": row["instance_id"], "base_commit": row["base_commit"], "image": image, "code": fingerprint, "settings": settings, "effective_config": effective}
@@ -196,7 +202,7 @@ def run_trial(row, model, cfg, settings, image, repos_dir, output, fingerprint, 
                           max_output_tokens=settings["max_tokens"], stream=False), runtime=runtime)
             with EventLog.create(task, log_dir=str(trial / "logs")) as log:
                 result = agent.run(task, log)
-            record.update(status="infrastructure_error" if result.error else result.status.value, tokens=result.total_tokens, validation=result.validation, retrieval=result.retrieval, summary=result.summary.replace(cfg.llm.api_key, "[REDACTED]"), patch=capture_patch(str(repo), base_ref=base_commit))
+            record.update(status="infrastructure_error" if result.error else result.status.value, tokens=result.total_tokens, validation=result.validation, retrieval=result.retrieval, memory=result.memory, summary=result.summary.replace(cfg.llm.api_key, "[REDACTED]"), patch=capture_patch(str(repo), base_ref=base_commit))
         except KeyboardInterrupt:
             interrupted = True
             record.update(status="interrupted", error="Interrupted; saved checkpoint may be resumed")

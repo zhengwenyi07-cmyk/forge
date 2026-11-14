@@ -139,6 +139,27 @@ def _build_registry(cfg, confirm_callback=None, runtime=None,
         budget = cfg.context.local_map_budget if operation == "repo_map" else cfg.context.retrieval_result_budget
         registry.register(RepoQueryTool(operation, token_budget=budget, weights=cfg.context.retrieval_weights))
 
+    if cfg.memory.enabled:
+        from memory.manager import MemoryManager
+        from memory.store import MemoryStore
+        from tools.memory_tool import MemoryGetTool, MemorySearchTool
+        memory_path = Path(cfg.memory.path).expanduser().resolve() if cfg.memory.path else None
+        if memory_path is not None and repo_path:
+            workspace = Path(repo_path).resolve()
+            if memory_path == workspace or memory_path.is_relative_to(workspace):
+                raise ValueError("memory.path must be outside the target workspace")
+        memory_manager = MemoryManager(
+            MemoryStore(memory_path, busy_timeout_ms=cfg.memory.busy_timeout_ms),
+            enabled=True,
+            initial_token_budget=cfg.memory.initial_token_budget,
+            search_token_budget=cfg.memory.search_token_budget,
+            max_results=cfg.memory.max_results,
+            retention_days=cfg.memory.retention_days,
+            weights=cfg.memory.weights,
+        )
+        registry.memory_manager = memory_manager
+        registry.register(MemorySearchTool(memory_manager)).register(MemoryGetTool(memory_manager))
+
     # 注册 TaskTool（multi-agent 入口）
     if task_registry and backend and repo_path:
         from tools.task_tool import TaskTool
@@ -460,6 +481,8 @@ def run(
 @click.option("--provider", "-p", default=None, help="Override LLM provider")
 @click.option("--max-steps", default=None, type=int, help="Max steps per round")
 @click.option("--task-type", type=click.Choice(["modify", "read_only"]), default="modify")
+@click.option("--session-id", default="default", show_default=True, help="Persistent chat session name")
+@click.option("--resume/--no-resume", default=None, help="Restore the named chat session checkpoint")
 @click.option("--sandbox/--no-sandbox", default=True, help="Use Linux Docker by default; --no-sandbox requires Linux/WSL")
 @click.option("--verbose", "-v", is_flag=True, help="Show debug logs")
 @click.pass_context
@@ -469,6 +492,8 @@ def chat(
     model: str | None,
     provider: str | None,
     max_steps: int | None,
+    session_id: str,
+    resume: bool | None,
     sandbox: bool,
     task_type: str,
     verbose: bool,
@@ -543,6 +568,8 @@ def chat(
         task_registry=task_registry,          # multi-agent 支持
         runtime=runtime,
         task_type=task_type,
+        session_id=session_id,
+        resume=resume,
     )
 
     # 欢迎信息
@@ -550,6 +577,10 @@ def chat(
     click.echo(f"  Provider : {config.llm.provider}")
     click.echo(f"  Model    : {config.llm.model}")
     click.echo(f"  Repo     : {repo_path}")
+    click.echo(f"  Session  : {session_id}" + (" (restored)" if getattr(session, "session_restored", False) else ""))
+    checkpoint_error = getattr(session, "checkpoint_error", None)
+    if checkpoint_error:
+        click.echo(yellow(f"  Memory checkpoint degraded: {checkpoint_error}"))
     click.echo(dim(f"  Type your task. Commands: /exit /stats /clear /help\n"))
 
     # 启用行编辑：退格、方向键、Ctrl+A/E、历史记录（↑↓）
@@ -605,7 +636,7 @@ def chat(
                 elif cmd == "/stats":
                     session.print_stats()
                 elif cmd == "/clear":
-                    session._shared_history.clear_except_first()
+                    session.clear_history()
                     click.echo(dim("  History cleared (kept initial context)."))
                 elif cmd == "/help":
                     click.echo(dim(

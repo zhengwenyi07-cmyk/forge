@@ -169,6 +169,7 @@ class Agent:
         self._runtime = runtime
         # 运行时配置（熔断/重试/流式/确认参数）
         self._cfg = config or AgentConfig()
+        self._memory_manager = getattr(registry, "memory_manager", None)
 
     # ==================================================================
     # 公开接口 — run(task, log) → RunResult
@@ -183,8 +184,14 @@ class Agent:
         self.context = RunContext(task.task_id, task.repo_path, task.task_type, ledger)
         self._base_commit = None
         self._patch_error = None
+        self._memory_initial = ""
         if "task" in self._registry and hasattr(self._registry.tools["task"], "set_run_context"):
             self._registry.tools["task"].set_run_context(self.context, self._cfg)
+        if self._memory_manager is not None:
+            try:
+                self._memory_initial = self._memory_manager.start_task(task)
+            except Exception as exc:
+                logger.warning("Long-term memory unavailable at task start: %s", exc)
         try:
             result = self._run(task, log)
         except KeyboardInterrupt:
@@ -245,10 +252,19 @@ class Agent:
             result.artifact_error = self._patch_error
         if task.task_type == "read_only":
             result.patch = None
+        if self._memory_manager is not None:
+            result.memory = self._memory_manager.metrics(result)
         try:
             self.context.save(result, log.path)
         except (OSError, ValueError, RuntimeError) as exc:
             result.artifact_error = str(exc)
+        if self._memory_manager is not None:
+            result.memory = self._memory_manager.record_run(task, result, self.context, log.path)
+            # Persist final write/deduplication metrics as part of the normal artifact.
+            try:
+                self.context.save(result, log.path)
+            except (OSError, ValueError, RuntimeError) as exc:
+                result.artifact_error = result.artifact_error or str(exc)
         return result
 
     def _run(self, task: Task, log: EventLog) -> RunResult:
@@ -727,8 +743,11 @@ class Agent:
         # 第一层已由 ConversationHistory 滑动窗口完成（条数维度）。
         from context.token_budget import estimate_tokens
         memory = self.context.memory() if hasattr(self, "context") else ""
+        historical_memory = getattr(self, "_memory_initial", "")
         output_limit = getattr(self._backend, "_max_tokens", self._cfg.max_output_tokens)
-        fixed_cost = estimate_tokens(system_content) + estimate_tokens(memory) + estimate_tokens(json.dumps([vars(s) for s in schemas])) + output_limit + 512
+        fixed_cost = (estimate_tokens(system_content) + estimate_tokens(memory)
+                      + estimate_tokens(historical_memory)
+                      + estimate_tokens(json.dumps([vars(s) for s in schemas])) + output_limit + 512)
         history_limit = self._cfg.context_window - fixed_cost
         if history_limit < 128:
             raise ValueError("Context window is too small for instructions, tool schemas and output reserve; lower repo_map_budget/max_tokens or increase context_window")
@@ -736,6 +755,8 @@ class Agent:
 
         # 组装完整 messages：system 放在第 0 位（永不裁剪）→ 裁剪后的 history
         messages = [LLMMessage(role="system", content=system_content)]
+        if historical_memory:
+            messages.append(LLMMessage(role="user", content=historical_memory))
         for d in trimmed_history_dicts:
             messages.append(LLMMessage(**d))
         if memory:
