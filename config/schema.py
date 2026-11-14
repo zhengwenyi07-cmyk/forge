@@ -132,6 +132,24 @@ class RuntimeConfig:
 
 
 @dataclass
+class MemoryConfig:
+    """Local persistent conversation checkpoints and cross-task episodic memory."""
+    enabled: bool = True
+    path: str = ""  # empty uses the OS-specific user state directory
+    initial_token_budget: int = 600
+    search_token_budget: int = 800
+    max_results: int = 5
+    retention_days: int = 180
+    busy_timeout_ms: int = 5000
+    auto_resume_chat: bool = True
+    weights: dict[str, float] = field(default_factory=lambda: {
+        "lexical": 3.0, "fingerprint": 2.5, "path": 2.0, "symbol": 1.5,
+        "validation": 1.5, "confidence": 1.0, "recency": 0.5,
+        "stale": 1.5, "repeat": 2.0,
+    })
+
+
+@dataclass
 class AppConfig:
     """
     顶层应用配置（所有配置的根容器）。
@@ -144,6 +162,7 @@ class AppConfig:
     tools: ToolsConfig = field(default_factory=ToolsConfig)
     context: ContextConfig = field(default_factory=ContextConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
+    memory: MemoryConfig = field(default_factory=MemoryConfig)
 
 
 # ===========================================================================
@@ -248,6 +267,7 @@ def _parse(data: dict[str, Any]) -> AppConfig:
     agent_raw = data.get("agent", {})
     tools_raw = data.get("tools", {})
     context_raw = data.get("context", {})
+    memory_raw = data.get("memory", {})
 
     llm = LLMConfig(
         provider=llm_raw.get("provider", "anthropic"),
@@ -302,6 +322,31 @@ def _parse(data: dict[str, Any]) -> AppConfig:
     )
     if type(runtime.setup_network) is not bool or runtime.setup_timeout < 1:
         raise ValueError("Runtime setup_network must be boolean and setup_timeout must be positive")
+    memory_defaults = MemoryConfig()
+    memory = MemoryConfig(
+        enabled=memory_raw.get("enabled", memory_defaults.enabled),
+        path=str(memory_raw.get("path", memory_defaults.path) or ""),
+        initial_token_budget=int(memory_raw.get("initial_token_budget", memory_defaults.initial_token_budget)),
+        search_token_budget=int(memory_raw.get("search_token_budget", memory_defaults.search_token_budget)),
+        max_results=int(memory_raw.get("max_results", memory_defaults.max_results)),
+        retention_days=int(memory_raw.get("retention_days", memory_defaults.retention_days)),
+        busy_timeout_ms=int(memory_raw.get("busy_timeout_ms", memory_defaults.busy_timeout_ms)),
+        auto_resume_chat=memory_raw.get("auto_resume_chat", memory_defaults.auto_resume_chat),
+        weights=memory_raw.get("weights", memory_defaults.weights),
+    )
+    if type(memory.enabled) is not bool or type(memory.auto_resume_chat) is not bool:
+        raise ValueError("memory.enabled and memory.auto_resume_chat must be boolean")
+    if min(memory.max_results, memory.retention_days, memory.busy_timeout_ms) < 1:
+        raise ValueError("Memory budgets, limits, retention and timeout must be positive")
+    if min(memory.initial_token_budget, memory.search_token_budget) < 64:
+        raise ValueError("Memory token budgets must be at least 64")
+    if memory.initial_token_budget >= context.context_window // 2 or memory.search_token_budget >= context.context_window:
+        raise ValueError("Memory token budgets must leave room for task context and model output")
+    if memory.max_results > 20:
+        raise ValueError("memory.max_results must be between 1 and 20")
+    expected_memory_weights = {"lexical", "fingerprint", "path", "symbol", "validation", "confidence", "recency", "stale", "repeat"}
+    if set(memory.weights) != expected_memory_weights or any(type(v) not in (int, float) or v < 0 for v in memory.weights.values()):
+        raise ValueError("Invalid memory.weights")
     if min(agent.max_steps, agent.budget_tokens, llm.max_tokens, context.history_window,
            tools.shell.timeout, tools.shell.max_output_tokens, tools.file.max_view_lines) < 1:
         raise ValueError("Step, token, history and tool limits must be positive")
@@ -319,7 +364,7 @@ def _parse(data: dict[str, Any]) -> AppConfig:
         raise ValueError("context.retrieval_refresh_steps must be between 1 and 20")
     if set(context.retrieval_weights) != {"path", "symbol", "text", "pagerank"} or any(type(v) not in (int, float) or v < 0 for v in context.retrieval_weights.values()):
         raise ValueError("Invalid context.retrieval_weights")
-    return AppConfig(llm=llm, agent=agent, tools=tools, context=context, runtime=runtime)
+    return AppConfig(llm=llm, agent=agent, tools=tools, context=context, runtime=runtime, memory=memory)
 
 
 def merge_cli_overrides(

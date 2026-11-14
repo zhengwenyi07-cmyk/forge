@@ -9,3 +9,10 @@ config/*.local.yaml
 evaluation/runs/
 build/
 dist/
+.forge-memory/
+*.memory.sqlite
+*.memory.sqlite-shm
+*.memory.sqlite-wal
+*.memory.sqlite3
+*.memory.sqlite3-shm
+*.memory.sqlite3-wal

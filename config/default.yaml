@@ -28,3 +28,14 @@ runtime:
     - python -m pip check
   setup_network: true
   setup_timeout: 600
+memory:
+  enabled: true
+  # Empty uses %LOCALAPPDATA%/Forge/memory on Windows or XDG_STATE_HOME on Linux.
+  path: ""
+  initial_token_budget: 600
+  search_token_budget: 800
+  max_results: 5
+  retention_days: 180
+  busy_timeout_ms: 5000
+  auto_resume_chat: true
+  weights: {lexical: 3.0, fingerprint: 2.5, path: 2.0, symbol: 1.5, validation: 1.5, confidence: 1.0, recency: 0.5, stale: 1.5, repeat: 2.0}

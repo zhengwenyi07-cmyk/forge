@@ -46,7 +46,7 @@ evaluation = ["swebench30.json"]
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["agent*", "llm*", "tools*", "context*", "entry*", "config*", "multi_agent*", "evaluation*"]
+include = ["agent*", "llm*", "tools*", "context*", "entry*", "config*", "multi_agent*", "evaluation*", "memory*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
