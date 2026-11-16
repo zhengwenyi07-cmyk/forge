@@ -139,7 +139,7 @@ class EventLog:
     # 所有写入方法都调用底层的 _append()，确保统一的序列化和 flush 策略。
     # ==================================================================
 
-    def log_task_start(self, task: Task) -> None:
+    def log_task_start(self, task: Task) -> str:
         """
         任务开始。
         写入 Agent 运行的第一个 Event，记录完整的 Task 输入信息。
@@ -147,13 +147,13 @@ class EventLog:
         Args:
             task: Task 对象，to_dict() 后包含 description / repo_path / max_steps 等
         """
-        self._append(Event(
+        return self._append(Event(
             event_type=EventType.TASK_START,
             task_id=task.task_id,
             payload={"task": task.to_dict()},
         ))
 
-    def log_action(self, step: int, action: Action, raw_content: str = "") -> None:
+    def log_action(self, step: int, action: Action, raw_content: str = "") -> str:
         """
         Agent 的每一步决策。
 
@@ -164,7 +164,7 @@ class EventLog:
                          包含 LLM 的完整推理链和 SDK 返回的原始响应。
                          对于流式模式，此字段可能为空或摘要。
         """
-        self._append(Event(
+        return self._append(Event(
             event_type=EventType.ACTION,
             task_id=self._current_task_id,
             payload={
@@ -174,7 +174,7 @@ class EventLog:
             },
         ))
 
-    def log_observation(self, step: int, observation: Observation) -> None:
+    def log_observation(self, step: int, observation: Observation) -> str:
         """
         工具执行结果。
 
@@ -182,7 +182,7 @@ class EventLog:
             step:        当前步数（与对应的 log_action 的 step 值一致）
             observation: Observation 对象，包含 status / output / tool_name / error
         """
-        self._append(Event(
+        return self._append(Event(
             event_type=EventType.OBSERVATION,
             task_id=self._current_task_id,
             payload={
@@ -191,7 +191,7 @@ class EventLog:
             },
         ))
 
-    def log_reflection(self, step: int, reason: str, prompt: str) -> None:
+    def log_reflection(self, step: int, reason: str, prompt: str) -> str:
         """
         触发 Reflection 时记录。
 
@@ -202,7 +202,7 @@ class EventLog:
             prompt: 注入 LLM 的 reflection prompt 内容。
                     用于事后分析"Agent 被注入了什么提示来引导方向调整"
         """
-        self._append(Event(
+        return self._append(Event(
             event_type=EventType.REFLECTION,
             task_id=self._current_task_id,
             payload={
@@ -212,7 +212,7 @@ class EventLog:
             },
         ))
 
-    def log_task_complete(self, steps: int, summary: str) -> None:
+    def log_task_complete(self, steps: int, summary: str) -> str:
         """
         任务成功完成。
 
@@ -220,7 +220,7 @@ class EventLog:
             steps:   总步数
             summary: 完成摘要，通常来自 Action.message（LLM 的总结）
         """
-        self._append(Event(
+        return self._append(Event(
             event_type=EventType.TASK_COMPLETE,
             task_id=self._current_task_id,
             payload={
@@ -229,7 +229,7 @@ class EventLog:
             },
         ))
 
-    def log_task_failed(self, steps: int, reason: str) -> None:
+    def log_task_failed(self, steps: int, reason: str) -> str:
         """
         任务失败或被熔断。
 
@@ -241,7 +241,7 @@ class EventLog:
                     - "Reached max_steps limit (N)"
                     - MockBackend 脚本用尽时的自动 GIVE_UP
         """
-        self._append(Event(
+        return self._append(Event(
             event_type=EventType.TASK_FAILED,
             task_id=self._current_task_id,
             payload={
@@ -371,7 +371,7 @@ class EventLog:
     # 内部方法
     # ==================================================================
 
-    def _append(self, event: Event) -> None:
+    def _append(self, event: Event) -> str:
         """
         写入一条 event。
         每次写入后立即 flush，确保崩溃不丢数据。
@@ -384,9 +384,12 @@ class EventLog:
            所以 flush 开销可忽略不计，而数据安全性收益巨大）
         - ensure_ascii=False：保留非 ASCII 字符（如中文），不转义为 \\uXXXX 形式
         """
+        from memory.security import redact_secret_structure
+        event.payload = redact_secret_structure(event.payload, max_string_chars=100_000)
         line = json.dumps(event.to_dict(), ensure_ascii=False)
         self._file.write(line + "\n")
         self._file.flush()
+        return event.event_id
 
     def close(self) -> None:
         """

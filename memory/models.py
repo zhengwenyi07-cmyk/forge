@@ -57,6 +57,7 @@ class SessionCheckpoint:
     round_count: int
     total_tokens: int
     total_steps: int
+    context_state: dict[str, Any] = field(default_factory=dict)
     created_at: str = ""
     updated_at: str = ""
-    schema_version: int = 1
+    schema_version: int = 2

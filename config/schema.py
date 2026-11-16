@@ -116,6 +116,14 @@ class ContextConfig:
     local_map_budget: int = 1200
     retrieval_refresh_steps: int = 3
     retrieval_weights: dict[str, float] = field(default_factory=lambda: {"path": 3.0, "symbol": 2.0, "text": 1.0, "pagerank": 1.0})
+    strategy: str = "evidence_preserving"
+    soft_limit_ratio: float = 0.65
+    compact_limit_ratio: float = 0.78
+    hard_limit_ratio: float = 0.90
+    capsule_token_budget: int = 1500
+    recall_token_budget: int = 2000
+    evidence_retention_steps: int = 100
+    enable_history_expand: bool = True
 
 
 @dataclass
@@ -306,6 +314,14 @@ def _parse(data: dict[str, Any]) -> AppConfig:
         local_map_budget=int(context_raw.get("local_map_budget", 1200)),
         retrieval_refresh_steps=int(context_raw.get("retrieval_refresh_steps", 3)),
         retrieval_weights=context_raw.get("retrieval_weights", {"path": 3.0, "symbol": 2.0, "text": 1.0, "pagerank": 1.0}),
+        strategy=str(context_raw.get("strategy", "evidence_preserving")),
+        soft_limit_ratio=float(context_raw.get("soft_limit_ratio", 0.65)),
+        compact_limit_ratio=float(context_raw.get("compact_limit_ratio", 0.78)),
+        hard_limit_ratio=float(context_raw.get("hard_limit_ratio", 0.90)),
+        capsule_token_budget=int(context_raw.get("capsule_token_budget", 1500)),
+        recall_token_budget=int(context_raw.get("recall_token_budget", 2000)),
+        evidence_retention_steps=int(context_raw.get("evidence_retention_steps", 100)),
+        enable_history_expand=context_raw.get("enable_history_expand", True),
     )
 
     runtime_raw = data.get("runtime", {})
@@ -364,6 +380,18 @@ def _parse(data: dict[str, Any]) -> AppConfig:
         raise ValueError("context.retrieval_refresh_steps must be between 1 and 20")
     if set(context.retrieval_weights) != {"path", "symbol", "text", "pagerank"} or any(type(v) not in (int, float) or v < 0 for v in context.retrieval_weights.values()):
         raise ValueError("Invalid context.retrieval_weights")
+    if context.strategy not in {"evidence_preserving", "sliding_window"}:
+        raise ValueError("context.strategy must be evidence_preserving or sliding_window")
+    if not 0 < context.soft_limit_ratio < context.compact_limit_ratio < context.hard_limit_ratio < 1:
+        raise ValueError("Context ratios must satisfy 0 < soft < compact < hard < 1")
+    if min(context.capsule_token_budget, context.recall_token_budget) < 64:
+        raise ValueError("Context capsule and recall budgets must be at least 64 tokens")
+    if context.capsule_token_budget >= context.context_window // 2 or context.recall_token_budget >= context.context_window:
+        raise ValueError("Context evidence budgets must leave room for model output")
+    if not 1 <= context.evidence_retention_steps <= 10000:
+        raise ValueError("context.evidence_retention_steps must be between 1 and 10000")
+    if type(context.enable_history_expand) is not bool:
+        raise ValueError("context.enable_history_expand must be boolean")
     return AppConfig(llm=llm, agent=agent, tools=tools, context=context, runtime=runtime, memory=memory)
 
 

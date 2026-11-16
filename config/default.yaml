@@ -10,6 +10,14 @@ agent:
   run_token_limit: 80000
   log_dir: ./logs
 context:
+  strategy: evidence_preserving
+  soft_limit_ratio: 0.65
+  compact_limit_ratio: 0.78
+  hard_limit_ratio: 0.90
+  capsule_token_budget: 1500
+  recall_token_budget: 2000
+  evidence_retention_steps: 100
+  enable_history_expand: true
   context_window: 32768
   repo_map_budget: 4000
   repo_map_strategy: retrieval

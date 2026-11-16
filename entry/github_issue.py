@@ -359,6 +359,14 @@ def run_on_issue(
         repo_map_strategy=config.context.repo_map_strategy,
         overview_budget=config.context.overview_budget,
         retrieval_refresh_steps=config.context.retrieval_refresh_steps,
+        context_strategy=config.context.strategy,
+        soft_limit_ratio=config.context.soft_limit_ratio,
+        compact_limit_ratio=config.context.compact_limit_ratio,
+        hard_limit_ratio=config.context.hard_limit_ratio,
+        capsule_token_budget=config.context.capsule_token_budget,
+        recall_token_budget=config.context.recall_token_budget,
+        evidence_retention_steps=config.context.evidence_retention_steps,
+        enable_history_expand=config.context.enable_history_expand,
     )
     agent = Agent(backend, registry, agent_config, runtime=runtime)
 

@@ -16,7 +16,7 @@ from typing import Iterator
 from memory.models import MemoryRecord, SessionCheckpoint
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def utc_now() -> str:
@@ -69,6 +69,8 @@ class MemoryStore:
                         raise RuntimeError(f"Memory schema {version} is newer than supported {SCHEMA_VERSION}")
                     if version < 1:
                         self._migrate_v1(conn)
+                    if version < 2:
+                        self._migrate_v2(conn)
                     conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
                     conn.commit()
                 except Exception:
@@ -152,6 +154,12 @@ class MemoryStore:
             );
             """
         )
+
+    @staticmethod
+    def _migrate_v2(conn: sqlite3.Connection) -> None:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(session_checkpoints)")}
+        if "context_json" not in columns:
+            conn.execute("ALTER TABLE session_checkpoints ADD COLUMN context_json TEXT NOT NULL DEFAULT '{}'")
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
@@ -320,16 +328,21 @@ class MemoryStore:
         checkpoint.created_at = checkpoint.created_at or now
         checkpoint.updated_at = now
         payload = json.dumps(checkpoint.history, ensure_ascii=False)
+        context_payload = json.dumps(checkpoint.context_state, ensure_ascii=False)
         with self.transaction() as conn:
             conn.execute(
-                """INSERT INTO session_checkpoints VALUES(?,?,?,?,?,?,?,?,?)
+                """INSERT INTO session_checkpoints
+                (session_id, repository_id, history_json, round_count, total_tokens, total_steps,
+                 created_at, updated_at, schema_version, context_json)
+                VALUES(?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(session_id, repository_id) DO UPDATE SET
                 history_json=excluded.history_json, round_count=excluded.round_count,
                 total_tokens=excluded.total_tokens, total_steps=excluded.total_steps,
-                updated_at=excluded.updated_at, schema_version=excluded.schema_version""",
+                updated_at=excluded.updated_at, schema_version=excluded.schema_version,
+                context_json=excluded.context_json""",
                 (checkpoint.session_id, checkpoint.repository_id, payload, checkpoint.round_count,
                  checkpoint.total_tokens, checkpoint.total_steps, checkpoint.created_at,
-                 checkpoint.updated_at, checkpoint.schema_version),
+                 checkpoint.updated_at, checkpoint.schema_version, context_payload),
             )
 
     def load_session(self, session_id: str, repository_id: str) -> SessionCheckpoint | None:
@@ -348,7 +361,7 @@ class MemoryStore:
             session_id=row["session_id"], repository_id=row["repository_id"], history=history,
             round_count=int(row["round_count"]), total_tokens=int(row["total_tokens"]),
             total_steps=int(row["total_steps"]), created_at=row["created_at"], updated_at=row["updated_at"],
-            schema_version=int(row["schema_version"]),
+            context_state=json.loads(row["context_json"] or "{}"), schema_version=int(row["schema_version"]),
         )
 
     def backup(self, destination: str | Path) -> Path:

@@ -393,6 +393,7 @@ class MemoryManager:
     def save_session(
         self, session_id: str, repo_path: str, history: list[dict[str, Any]],
         round_count: int, total_tokens: int, total_steps: int,
+        context_state: dict[str, Any] | None = None,
     ) -> None:
         if not session_id or len(session_id) > 128 or any(ord(char) < 32 for char in session_id):
             raise ValueError("Invalid memory session id")
@@ -401,6 +402,7 @@ class MemoryManager:
         self.store.save_session(SessionCheckpoint(
             session_id=session_id, repository_id=repository.repository_id, history=safe_history,
             round_count=round_count, total_tokens=total_tokens, total_steps=total_steps,
+            context_state=sanitize_structure(context_state or {}, max_string_chars=20_000),
         ))
 
     def load_session(self, session_id: str, repo_path: str) -> SessionCheckpoint | None:

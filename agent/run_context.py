@@ -9,6 +9,7 @@ import threading
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 
 REPO_QUERY_TOOLS = frozenset({"repo_search", "repo_symbols", "repo_related_files", "repo_tree", "repo_map"})
@@ -104,6 +105,7 @@ class RunContext:
     retrieval_refreshes: int = 0
     retrieval_degraded_reason: str | None = None
     discovery_steps_since_retrieval: int = 0
+    evidence_context: Any = None
 
     def configure_retrieval(self, enabled: bool, refresh_steps: int = 3):
         self.retrieval_enabled = bool(enabled)
@@ -142,7 +144,11 @@ class RunContext:
         except (TypeError, ValueError, json.JSONDecodeError):
             return False
 
-    def observe(self, tool, params, result, step):
+    def observe(
+        self, tool, params, result, step, *, action_event_id=None,
+        observation_event_id=None, patch="",
+    ):
+        previous_phase = self.phase
         if tool in REPO_QUERY_TOOLS:
             self.retrieval_attempts += 1
             if tool in REPO_LOCALIZATION_TOOLS and self._localization_hit(result):
@@ -178,9 +184,21 @@ class RunContext:
         self.evidence = self.evidence[-12:]
         for artifact in result.artifacts:
             self.child_results[artifact["task_id"]] = artifact
+        if self.evidence_context is not None:
+            self.evidence_context.observe(
+                tool, params, result, step, action_event_id=action_event_id,
+                observation_event_id=observation_event_id, patch=patch, phase=self.phase,
+            )
+            if self.phase != previous_phase:
+                self.evidence_context.compact(
+                    [], step=step, reason=f"phase_transition:{previous_phase}->{self.phase}",
+                    before_tokens=0, after_tokens=0, truncated=False,
+                    source_event_ids=[value for value in (action_event_id, observation_event_id) if value],
+                )
 
     def memory(self):
-        return "[VERIFIED RUN STATE]\n" + json.dumps({
+        from memory.security import sanitize_structure
+        verified_state = sanitize_structure({
             "phase": self.phase, "related_paths": self.relevant_paths,
             "recent_tool_evidence": self.evidence,
             "child_results": list(self.child_results.values())[-8:],
@@ -195,15 +213,24 @@ class RunContext:
             },
             "last_validation": [{"success": v["success"], "params": v.get("params"),
                                   "command": v.get("command")} for v in self.validation[-2:]],
-        }, ensure_ascii=False)
+        }, max_string_chars=1000)
+        state = "[VERIFIED RUN STATE]\n" + json.dumps(verified_state, ensure_ascii=False)
+        if self.evidence_context is not None:
+            return self.evidence_context.render_capsule() + "\n" + state
+        return state
 
     def save(self, result, log_path):
         folder = Path(log_path).resolve().parent / "artifacts" / self.task_id
         folder.mkdir(parents=True, exist_ok=True)
         result.artifact_path = str(folder / "result.json")
+        if self.evidence_context is not None:
+            result.context = self.evidence_context.metrics()
+            self.evidence_context.persist()
         payload = {"result": result.to_dict(), "base_commit": self.base_commit,
                    "repo_path": self.repo_path, "task_type": self.task_type, "event_log": str(Path(log_path).resolve()),
-                   "state": json.loads(self.memory().split("\n", 1)[1]), "budget": self.ledger.snapshot()}
+                   "state": {"phase": self.phase, "related_paths": self.relevant_paths,
+                             "retrieval_degraded_reason": self.retrieval_degraded_reason},
+                   "context_evidence": result.context, "budget": self.ledger.snapshot()}
         if result.patch:
             (folder / "changes.patch").write_bytes(result.patch.encode("utf-8"))
             payload["patch_sha256"] = hashlib.sha256(result.patch.encode("utf-8")).hexdigest()

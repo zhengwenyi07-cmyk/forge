@@ -33,6 +33,7 @@ import json
 # logging：每个 step 输出 LLM 调用、Action 类型、Reflection 触发等关键事件
 import logging
 import subprocess
+from pathlib import Path
 # dataclass：AgentConfig 用 dataclass 承载配置，自动生成 __init__/__repr__
 from dataclasses import dataclass
 
@@ -44,7 +45,7 @@ from context.history import ConversationHistory
 from context.repo_map import RepoMap
 from agent.run_context import BudgetExceeded
 # TokenBudget：按优先级分配各部分的 token 配额，超出时裁剪
-from context.token_budget import TokenBudget
+from context.token_budget import TokenBudget, estimate_tokens
 # Prompt 模板函数：
 #   build_system_prompt → 渲染 system prompt（含 repo_summary 占位符）
 #   build_task_prompt → 渲染首条 user 消息（任务描述 + issue URL）
@@ -103,6 +104,14 @@ class AgentConfig:
     budget_ledger: object = None
     # 历史最大消息条数（第一层裁剪：ConversationHistory 滑动窗口）
     history_max_messages: int = 40
+    context_strategy: str = "evidence_preserving"
+    soft_limit_ratio: float = 0.65
+    compact_limit_ratio: float = 0.78
+    hard_limit_ratio: float = 0.90
+    capsule_token_budget: int = 1500
+    recall_token_budget: int = 2000
+    evidence_retention_steps: int = 100
+    enable_history_expand: bool = True
     # ── 重试 ────────────────────────────────────────────────────────────
     # LLM 调用失败最大重试次数（不重试 401/403/400 等客户端错误）
     llm_max_retries: int = 3
@@ -182,9 +191,37 @@ class Agent:
         self._registry = self._base_registry.for_task(task.task_type)
         ledger = self._cfg.budget_ledger or BudgetLedger(task.budget_tokens)
         self.context = RunContext(task.task_id, task.repo_path, task.task_type, ledger)
+        if self._cfg.context_strategy == "evidence_preserving":
+            from context.evidence import EvidenceContext
+            restored = getattr(self, "_pending_evidence_state", None)
+            evidence_context = EvidenceContext(
+                task.task_id, task.repo_path, Path(log.path).resolve().parent / "artifacts",
+                capsule_token_budget=self._cfg.capsule_token_budget,
+                recall_token_budget=self._cfg.recall_token_budget,
+                evidence_retention_steps=self._cfg.evidence_retention_steps,
+                enable_history_expand=self._cfg.enable_history_expand,
+                config={
+                    "strategy": self._cfg.context_strategy,
+                    "soft_limit_ratio": self._cfg.soft_limit_ratio,
+                    "compact_limit_ratio": self._cfg.compact_limit_ratio,
+                    "hard_limit_ratio": self._cfg.hard_limit_ratio,
+                    "capsule_token_budget": self._cfg.capsule_token_budget,
+                    "recall_token_budget": self._cfg.recall_token_budget,
+                    "evidence_retention_steps": self._cfg.evidence_retention_steps,
+                    "enable_history_expand": self._cfg.enable_history_expand,
+                },
+                restored_state=restored,
+            )
+            evidence_context.bind_event_log(log)
+            self.context.evidence_context = evidence_context
+            for name in ("context_recall", "evidence_get", "history_expand"):
+                tool = self._registry.tools.get(name)
+                if tool is not None and hasattr(tool, "bind"):
+                    tool.bind(evidence_context)
         self._base_commit = None
         self._patch_error = None
         self._memory_initial = ""
+        self._soft_limit_recorded = False
         if "task" in self._registry and hasattr(self._registry.tools["task"], "set_run_context"):
             self._registry.tools["task"].set_run_context(self.context, self._cfg)
         if self._memory_manager is not None:
@@ -216,6 +253,8 @@ class Agent:
         if task.task_type == "modify":
             result.patch = result.patch or self._get_git_diff(task.repo_path)
         result.validation = list(self.context.validation)
+        if self.context.evidence_context is not None:
+            result.context = self.context.evidence_context.metrics()
         query_tools = [self._registry.tools[name] for name in ("repo_search", "repo_symbols", "repo_related_files", "repo_tree", "repo_map") if name in self._registry.tools]
         queries = [event for tool in query_tools for event in tool.queries]
         actions = log.get_actions()
@@ -305,7 +344,9 @@ class Agent:
             if hasattr(self, "_repo_map_cache"):
                 del self._repo_map_cache
             self._repo_map_cache_key = cache_key
-        log.log_task_start(task)
+        task_start_event_id = log.log_task_start(task)
+        if self.context.evidence_context is not None:
+            self.context.evidence_context.start_task(task.description, task_start_event_id, self._base_commit)
         logger.info("Agent starting task %s", task.task_id)
 
         # 初始化对话历史：
@@ -320,6 +361,16 @@ class Agent:
                 role="user",
                 content=build_task_prompt(task.description, self._runtime._workdir if self._runtime and self._runtime.name.startswith("docker") else task.repo_path, task.issue_url),
             ))
+        self._current_step = 0
+        if self.context.evidence_context is not None:
+            def _before_history_evict(messages, reason):
+                before = sum(estimate_tokens(json.dumps(message, ensure_ascii=False)) for message in history.to_dicts())
+                removed = sum(estimate_tokens(json.dumps(message, ensure_ascii=False)) for message in messages)
+                return self.context.evidence_context.compact(
+                    messages, step=self._current_step, reason=reason,
+                    before_tokens=before, after_tokens=max(0, before - removed), truncated=True,
+                )
+            history.set_compaction_handler(_before_history_evict)
         # 单次上下文窗口只负责消息裁剪；累计开销由共享 ledger 处理。
         token_budget = TokenBudget(total=self._cfg.context_window)
         # RepoMap：扫描 repo 提取符号，生成摘要字符串。
@@ -356,6 +407,7 @@ class Agent:
         # 每轮迭代：组装消息 → LLM 推理 → 解析 Action → 执行/终止
         # ═══════════════════════════════════════════════════════════════════
         for step in range(1, task.max_steps + 1):
+            self._current_step = step
             logger.debug("Step %d/%d", step, task.max_steps)
             ledger_limit = self.context.ledger.limit
             if ((ledger_limit is not None and self.context.ledger.total >= ledger_limit) or
@@ -391,7 +443,9 @@ class Agent:
                 for message in self._cfg.message_source():
                     text = f"[PARENT MESSAGE]\n{message.content}"
                     history.add(LLMMessage(role="user", content=text))
-                    log.log_reflection(step=step, reason="parent_message", prompt=text)
+                    reflection_id = log.log_reflection(step=step, reason="parent_message", prompt=text)
+                    if self.context.evidence_context is not None:
+                        self.context.evidence_context.record_reflection(step, "parent_message", text, reflection_id)
 
             # ── 阶段 1：上下文组装 ────────────────────────────────────
             # _build_messages = system prompt（含 repo-map 摘要）+ 裁剪后的 history
@@ -431,7 +485,7 @@ class Agent:
 
             # ── 阶段 2b：Action 写入 EventLog ───────────────────────
             # 记录 LLM 的完整原文（raw_content：含 thought + tool_call/message）
-            log.log_action(step=step, action=action, raw_content=response.raw_content)
+            action_event_id = log.log_action(step=step, action=action, raw_content=response.raw_content)
             logger.info("Step %d: %r", step, action)
 
             if action.action_type == ActionType.TOOL_CALL and action.tool_call:
@@ -478,7 +532,13 @@ class Agent:
                     if patch and tested_patch != patch and task.test_cmd:
                         before_test = patch
                         result = self._registry.execute_tool("test", {"command": task.test_cmd, "cwd": task.repo_path})
-                        log.log_observation(step=step, observation=result.to_observation("test"))
+                        test_observation = result.to_observation("test")
+                        observation_event_id = log.log_observation(step=step, observation=test_observation)
+                        self.context.observe(
+                            "test", {"command": task.test_cmd, "cwd": task.repo_path}, result, step,
+                            action_event_id=action_event_id, observation_event_id=observation_event_id,
+                            patch=before_test,
+                        )
                         if result.test_attempted:
                             patch = self._get_git_diff(task.repo_path)
                             tested_patch = patch if patch == before_test else None
@@ -489,12 +549,19 @@ class Agent:
                         blockers.append("Attempt a targeted test using the test tool after the last change. Supply path or command, then call finish again.")
                 if blockers:
                     text = "[COMPLETION BLOCKED]\n" + "\n".join(blockers)
-                    log.log_reflection(step=step, reason="completion_gate", prompt=text)
+                    reflection_id = log.log_reflection(step=step, reason="completion_gate", prompt=text)
+                    if self.context.evidence_context is not None:
+                        self.context.evidence_context.record_reflection(step, "completion_gate", text, reflection_id)
                     history.add(LLMMessage(role="assistant", content=self._format_action_for_history(action)))
                     history.add(LLMMessage(role="user", content=text))
                     continue
                 if test_attempts and not test_attempts[-1]["success"]:
                     summary += "\nValidation: targeted test was attempted but did not pass; see validation results."
+                if self.context.evidence_context is not None:
+                    self.context.evidence_context.compact(
+                        [], step=step, reason="finish", before_tokens=0, after_tokens=0,
+                        truncated=False,
+                    )
                 log.log_task_complete(steps=step, summary=summary)
                 return RunResult(
                     task_id=task.task_id,
@@ -544,9 +611,7 @@ class Agent:
                     events = self._registry.tools[tc.name].queries
                     if events and "step" not in events[-1]:
                         events[-1]["step"] = step
-                        from context.token_budget import estimate_tokens
                         events[-1]["tokens"] = estimate_tokens(result.output)
-                self.context.observe(tc.name, tc.params, result, step)
                 observation = result.to_observation(tc.name)
                 if tc.name == "test" and result.test_attempted and (tc.params.get("path") or tc.params.get("command")):
                     after_test = self._get_git_diff(task.repo_path)
@@ -562,7 +627,22 @@ class Agent:
                     steps_without_edit += 1
 
                 # 写入 Observation event 到 EventLog
-                log.log_observation(step=step, observation=observation)
+                observation_event_id = log.log_observation(step=step, observation=observation)
+                current_patch = self._get_git_diff(task.repo_path) if tc.name in ({"test"} | {"file_write", "file_edit", "apply_patch", "edit"}) else ""
+                self.context.observe(
+                    tc.name, tc.params, result, step,
+                    action_event_id=action_event_id, observation_event_id=observation_event_id,
+                    patch=current_patch or "",
+                )
+                if (self.context.evidence_context is not None and
+                        estimate_tokens(result.output or result.error or "") >= int(self._cfg.context_window * self._cfg.soft_limit_ratio)):
+                    self.context.evidence_context.compact(
+                        [], step=step, reason="large_tool_result",
+                        before_tokens=estimate_tokens(result.output or result.error or ""),
+                        after_tokens=estimate_tokens(self._format_observation_for_history(observation)),
+                        truncated="truncated" in (result.output or "").lower(),
+                        source_event_ids=[action_event_id, observation_event_id],
+                    )
 
                 # ── 阶段 4：结果回写 ──
                 # Action 格式化为 assistant 消息（thought + tool_call params）
@@ -581,11 +661,13 @@ class Agent:
                     and not observation.is_success()
                 ):
                     reflect_prompt = reflection_test_failed()
-                    log.log_reflection(
+                    reflection_id = log.log_reflection(
                         step=step,
                         reason="test_failed",
                         prompt=reflect_prompt,
                     )
+                    if self.context.evidence_context is not None:
+                        self.context.evidence_context.record_reflection(step, "test_failed", reflect_prompt, reflection_id)
                     history.add(LLMMessage(role="user", content=reflect_prompt))
                     logger.debug("Reflection triggered: test_failed at step %d", step)
 
@@ -593,11 +675,13 @@ class Agent:
                 # 防止无尽探索：追问"有足够上下文了吗？有→动手改；没有→精确说出缺什么"
                 elif task.task_type == "modify" and self.context.phase in ("edit", "verify") and steps_without_edit >= self._cfg.reflection_no_edit_steps:
                     reflect_prompt = reflection_no_edit(steps_without_edit)
-                    log.log_reflection(
+                    reflection_id = log.log_reflection(
                         step=step,
                         reason="no_edit",
                         prompt=reflect_prompt,
                     )
+                    if self.context.evidence_context is not None:
+                        self.context.evidence_context.record_reflection(step, "no_edit", reflect_prompt, reflection_id)
                     history.add(LLMMessage(role="user", content=reflect_prompt))
                     steps_without_edit = 0  # 重置计数，避免每步都触发
                     logger.debug("Reflection triggered: no_edit at step %d", step)
@@ -670,6 +754,30 @@ class Agent:
                 + (f"Child patch preview (review validation; apply_patch artifact_task_id={notif.task_id}):\n{notif.patch[:8000]}\n" if notif.patch else "")
             )
             history.add(LLMMessage(role="user", content=notification_text))
+            event_id = log.log_reflection(
+                step=getattr(self, "_current_step", 0), reason="child_result", prompt=notification_text,
+            )
+            if self.context.evidence_context is not None:
+                artifact = {
+                    "task_id": notif.task_id, "status": notif.status.value,
+                    "artifact_path": notif.artifact_path, "summary": notif.summary[:500],
+                    "artifact_error": notif.artifact_error, "recovery_worktree": notif.recovery_worktree,
+                }
+                child_result = ToolResult(
+                    success=notif.status.value == "completed", output=notif.summary,
+                    error=None if notif.status.value == "completed" else notif.summary,
+                    artifacts=[artifact],
+                )
+                self.context.evidence_context.observe(
+                    "task_result", {"task_id": notif.task_id}, child_result,
+                    getattr(self, "_current_step", 0), observation_event_id=event_id,
+                    phase=self.context.phase,
+                )
+                self.context.evidence_context.compact(
+                    [], step=getattr(self, "_current_step", 0), reason="child_result",
+                    before_tokens=estimate_tokens(notification_text), after_tokens=estimate_tokens(notification_text),
+                    truncated=False, source_event_ids=[event_id],
+                )
             logger.info(
                 "Sub-agent %s (%s) completed: %s",
                 notif.task_id,
@@ -751,7 +859,39 @@ class Agent:
         history_limit = self._cfg.context_window - fixed_cost
         if history_limit < 128:
             raise ValueError("Context window is too small for instructions, tool schemas and output reserve; lower repo_map_budget/max_tokens or increase context_window")
-        trimmed_history_dicts = token_budget.trim_history(history.to_dicts(), history_limit)
+        full_history_dicts = history.to_dicts()
+        before_history_tokens = sum(estimate_tokens(json.dumps(message, ensure_ascii=False)) for message in full_history_dicts)
+        utilization = (fixed_cost + before_history_tokens) / max(1, self._cfg.context_window)
+        trimmed_history_dicts = token_budget.trim_history(full_history_dicts, history_limit)
+        if self.context.evidence_context is not None:
+            if utilization >= self._cfg.soft_limit_ratio and not getattr(self, "_soft_limit_recorded", False):
+                self.context.evidence_context.compact(
+                    [], step=getattr(self, "_current_step", 0), reason="soft_limit",
+                    before_tokens=fixed_cost + before_history_tokens,
+                    after_tokens=fixed_cost + before_history_tokens, truncated=False,
+                )
+                self._soft_limit_recorded = True
+            from collections import Counter
+            kept = Counter(json.dumps(message, ensure_ascii=False, sort_keys=True) for message in trimmed_history_dicts)
+            removed = []
+            for message in full_history_dicts:
+                key = json.dumps(message, ensure_ascii=False, sort_keys=True)
+                if kept[key]:
+                    kept[key] -= 1
+                else:
+                    removed.append(message)
+            if removed:
+                reason = (
+                    "hard_limit" if utilization >= self._cfg.hard_limit_ratio else
+                    "compact_limit" if utilization >= self._cfg.compact_limit_ratio else
+                    "token_projection"
+                )
+                self.context.evidence_context.compact(
+                    removed, step=getattr(self, "_current_step", 0), reason=reason,
+                    before_tokens=before_history_tokens,
+                    after_tokens=sum(estimate_tokens(json.dumps(message, ensure_ascii=False)) for message in trimmed_history_dicts),
+                    truncated=True,
+                )
 
         # 组装完整 messages：system 放在第 0 位（永不裁剪）→ 裁剪后的 history
         messages = [LLMMessage(role="system", content=system_content)]

@@ -39,6 +39,17 @@ class ConversationHistory:
         """
         self._messages: list[LLMMessage] = []
         self._max = max_messages
+        self._compaction_handler = None
+
+    def set_compaction_handler(self, handler) -> None:
+        """Run ``handler(messages, reason)`` before message-count eviction.
+
+        Returning False aborts eviction and intentionally leaves history above
+        its configured window so an evidence persistence failure is visible and
+        recoverable instead of becoming silent data loss.
+        """
+        self._compaction_handler = handler
+        self._trim()
 
     def add(self, message: LLMMessage) -> None:
         """添加一条消息，超出窗口时丢弃最旧的非首条消息。"""
@@ -76,6 +87,10 @@ class ConversationHistory:
     def clear_except_first(self) -> None:
         """保留首条任务描述，清除其余（紧急重置用）。"""
         if self._messages:
+            removed = self._messages[1:]
+            if removed and self._compaction_handler is not None:
+                if not self._compaction_handler([message.to_dict() for message in removed], "explicit_clear"):
+                    return
             self._messages = [self._messages[0]]
 
     def _trim(self) -> None:
@@ -83,9 +98,19 @@ class ConversationHistory:
         while len(self._messages) > self._max:
             # 保留 index 0（任务描述），从 index 1 开始丢
             if len(self._messages) > 1:
-                self._messages.pop(1)
-                while len(self._messages) > 1 and self._messages[1].tool_call_id:
-                    self._messages.pop(1)
+                count = 1
+                if self._messages[1].tool_calls:
+                    call_ids = {call.get("id") for call in self._messages[1].tool_calls or []}
+                    while 1 + count < len(self._messages) and self._messages[1 + count].tool_call_id in call_ids:
+                        count += 1
+                elif self._messages[1].tool_call_id:
+                    while 1 + count < len(self._messages) and self._messages[1 + count].tool_call_id:
+                        count += 1
+                evicted = self._messages[1:1 + count]
+                if self._compaction_handler is not None:
+                    if not self._compaction_handler([message.to_dict() for message in evicted], "message_limit"):
+                        break
+                del self._messages[1:1 + count]
             else:
                 break
 

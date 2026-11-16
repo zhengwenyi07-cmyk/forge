@@ -139,6 +139,13 @@ def _build_registry(cfg, confirm_callback=None, runtime=None,
         budget = cfg.context.local_map_budget if operation == "repo_map" else cfg.context.retrieval_result_budget
         registry.register(RepoQueryTool(operation, token_budget=budget, weights=cfg.context.retrieval_weights))
 
+    if cfg.context.strategy == "evidence_preserving":
+        from tools.context_tool import ContextRecallTool, EvidenceGetTool, HistoryExpandTool
+        registry.register(ContextRecallTool(cfg.context.recall_token_budget))
+        registry.register(EvidenceGetTool(cfg.context.recall_token_budget))
+        if cfg.context.enable_history_expand:
+            registry.register(HistoryExpandTool(cfg.context.recall_token_budget))
+
     if cfg.memory.enabled:
         from memory.manager import MemoryManager
         from memory.store import MemoryStore
@@ -406,6 +413,14 @@ def run(
         repo_map_strategy=config.context.repo_map_strategy,
         overview_budget=config.context.overview_budget,
         retrieval_refresh_steps=config.context.retrieval_refresh_steps,
+        context_strategy=config.context.strategy,
+        soft_limit_ratio=config.context.soft_limit_ratio,
+        compact_limit_ratio=config.context.compact_limit_ratio,
+        hard_limit_ratio=config.context.hard_limit_ratio,
+        capsule_token_budget=config.context.capsule_token_budget,
+        recall_token_budget=config.context.recall_token_budget,
+        evidence_retention_steps=config.context.evidence_retention_steps,
+        enable_history_expand=config.context.enable_history_expand,
         history_max_messages=config.context.history_window * 2,
         stream=stream,
         stream_callback=_stream_cb if stream else None,

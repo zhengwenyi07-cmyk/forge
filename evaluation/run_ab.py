@@ -132,6 +132,14 @@ def run_trial(row, model, cfg, settings, image, repos_dir, output, fingerprint, 
                  "local_map_budget": cfg.context.local_map_budget,
                  "retrieval_weights": cfg.context.retrieval_weights,
                  "repo_map_strategy": cfg.context.repo_map_strategy, "endpoint": cfg.llm.base_url,
+                 "context_evidence": {"strategy": cfg.context.strategy,
+                                      "soft_limit_ratio": cfg.context.soft_limit_ratio,
+                                      "compact_limit_ratio": cfg.context.compact_limit_ratio,
+                                      "hard_limit_ratio": cfg.context.hard_limit_ratio,
+                                      "capsule_token_budget": cfg.context.capsule_token_budget,
+                                      "recall_token_budget": cfg.context.recall_token_budget,
+                                      "evidence_retention_steps": cfg.context.evidence_retention_steps,
+                                      "enable_history_expand": cfg.context.enable_history_expand},
                  "memory": {"enabled": cfg.memory.enabled,
                             "initial_token_budget": cfg.memory.initial_token_budget,
                             "search_token_budget": cfg.memory.search_token_budget,
@@ -199,10 +207,16 @@ def run_trial(row, model, cfg, settings, image, repos_dir, output, fingerprint, 
             agent = Agent(backend, registry, AgentConfig(budget_tokens=settings["budget_tokens"], history_max_messages=40,
                           context_window=cfg.context.context_window, repo_map_budget=cfg.context.repo_map_budget,
                           repo_map_strategy=cfg.context.repo_map_strategy, overview_budget=cfg.context.overview_budget,
+                          context_strategy=cfg.context.strategy, soft_limit_ratio=cfg.context.soft_limit_ratio,
+                          compact_limit_ratio=cfg.context.compact_limit_ratio, hard_limit_ratio=cfg.context.hard_limit_ratio,
+                          capsule_token_budget=cfg.context.capsule_token_budget,
+                          recall_token_budget=cfg.context.recall_token_budget,
+                          evidence_retention_steps=cfg.context.evidence_retention_steps,
+                          enable_history_expand=cfg.context.enable_history_expand,
                           max_output_tokens=settings["max_tokens"], stream=False), runtime=runtime)
             with EventLog.create(task, log_dir=str(trial / "logs")) as log:
                 result = agent.run(task, log)
-            record.update(status="infrastructure_error" if result.error else result.status.value, tokens=result.total_tokens, validation=result.validation, retrieval=result.retrieval, memory=result.memory, summary=result.summary.replace(cfg.llm.api_key, "[REDACTED]"), patch=capture_patch(str(repo), base_ref=base_commit))
+            record.update(status="infrastructure_error" if result.error else result.status.value, tokens=result.total_tokens, validation=result.validation, retrieval=result.retrieval, memory=result.memory, context=result.context, summary=result.summary.replace(cfg.llm.api_key, "[REDACTED]"), patch=capture_patch(str(repo), base_ref=base_commit))
         except KeyboardInterrupt:
             interrupted = True
             record.update(status="interrupted", error="Interrupted; saved checkpoint may be resumed")

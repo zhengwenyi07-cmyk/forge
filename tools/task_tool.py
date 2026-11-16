@@ -245,6 +245,14 @@ class TaskTool(BaseTool):
             sub_agent._config.repo_map_strategy = self._agent_config.repo_map_strategy
             sub_agent._config.retrieval_refresh_steps = self._agent_config.retrieval_refresh_steps
             sub_agent._config.max_output_tokens = self._agent_config.max_output_tokens
+            sub_agent._config.context_strategy = self._agent_config.context_strategy
+            sub_agent._config.soft_limit_ratio = self._agent_config.soft_limit_ratio
+            sub_agent._config.compact_limit_ratio = self._agent_config.compact_limit_ratio
+            sub_agent._config.hard_limit_ratio = self._agent_config.hard_limit_ratio
+            sub_agent._config.capsule_token_budget = self._agent_config.capsule_token_budget
+            sub_agent._config.recall_token_budget = self._agent_config.recall_token_budget
+            sub_agent._config.evidence_retention_steps = self._agent_config.evidence_retention_steps
+            sub_agent._config.enable_history_expand = self._agent_config.enable_history_expand
 
         # 注册并关联
         bg_task = self._task_registry.spawn(sub_agent, agent_type)

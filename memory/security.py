@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from enum import Enum
 
 
 _SECRET_PATTERNS = (
@@ -61,6 +62,39 @@ def sanitize_text(value: object, max_chars: int = 4000) -> SanitizedText:
     )
 
 
+def redact_secrets(value: object, max_chars: int = 100_000) -> str:
+    """Redact credentials without treating instruction-shaped text as executable.
+
+    EventLog uses this variant because it must preserve diagnostic text exactly
+    enough for replay while still refusing to persist credentials.
+    """
+    text = str(value or "").replace("\x00", "")
+    text = _PRIVATE_KEY.sub("[REDACTED PRIVATE KEY]", text)
+    for pattern in _SECRET_PATTERNS:
+        text = pattern.sub("[REDACTED SECRET]", text)
+    if len(text) > max_chars:
+        text = text[:max_chars] + "…[truncated]"
+    return text
+
+
+def redact_secret_structure(value: object, *, max_string_chars: int = 100_000) -> object:
+    """Recursively redact secrets while preserving the EventLog JSON shape."""
+    if isinstance(value, dict):
+        return {str(key)[:128]: redact_secret_structure(item, max_string_chars=max_string_chars)
+                for key, item in value.items()}
+    if isinstance(value, list):
+        return [redact_secret_structure(item, max_string_chars=max_string_chars) for item in value]
+    if isinstance(value, tuple):
+        return [redact_secret_structure(item, max_string_chars=max_string_chars) for item in value]
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, str):
+        return redact_secrets(value, max_chars=max_string_chars)
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return redact_secrets(value, max_chars=max_string_chars)
+
+
 def safe_label(value: object, max_chars: int = 240) -> str:
     """Return a display-safe label without URL userinfo or credentials."""
     text = str(value or "")
@@ -77,6 +111,8 @@ def sanitize_structure(value: object, *, max_string_chars: int = 4000) -> object
         return [sanitize_structure(item, max_string_chars=max_string_chars) for item in value[:256]]
     if isinstance(value, tuple):
         return [sanitize_structure(item, max_string_chars=max_string_chars) for item in value[:256]]
+    if isinstance(value, Enum):
+        return value.value
     if isinstance(value, str):
         return sanitize_text(value, max_chars=max_string_chars).text
     if value is None or isinstance(value, (bool, int, float)):

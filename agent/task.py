@@ -435,6 +435,7 @@ class RunResult:
     usage_complete: bool = True
     retrieval: dict[str, Any] = field(default_factory=dict)
     memory: dict[str, Any] = field(default_factory=dict)
+    context: dict[str, Any] = field(default_factory=dict)
 
     def is_success(self) -> bool:
         return self.status == RunStatus.SUCCESS

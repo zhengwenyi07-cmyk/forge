@@ -282,6 +282,14 @@ class ChatSession:
             repo_map_strategy=config.context.repo_map_strategy,
             overview_budget=config.context.overview_budget,
             retrieval_refresh_steps=config.context.retrieval_refresh_steps,
+            context_strategy=config.context.strategy,
+            soft_limit_ratio=config.context.soft_limit_ratio,
+            compact_limit_ratio=config.context.compact_limit_ratio,
+            hard_limit_ratio=config.context.hard_limit_ratio,
+            capsule_token_budget=config.context.capsule_token_budget,
+            recall_token_budget=config.context.recall_token_budget,
+            evidence_retention_steps=config.context.evidence_retention_steps,
+            enable_history_expand=config.context.enable_history_expand,
             # history_max_messages 设为 history_window * 2，
             # 因为一轮对话通常包含 1 条用户输入 + 多条 assistant 回复
             history_max_messages=config.context.history_window * 2,
@@ -306,6 +314,7 @@ class ChatSession:
         self.round_count = 0
         self.session_restored = False
         self.checkpoint_error = None
+        self._evidence_state = {}
         self._memory_manager = getattr(self.agent, "_memory_manager", None)
         should_resume = config.memory.auto_resume_chat if resume is None else resume
         if should_resume and self._memory_manager is not None:
@@ -318,6 +327,7 @@ class ChatSession:
                     self.round_count = checkpoint.round_count
                     self.total_tokens = checkpoint.total_tokens
                     self.total_steps = checkpoint.total_steps
+                    self._evidence_state = checkpoint.context_state
                     self.session_restored = True
             except Exception as exc:
                 self.checkpoint_error = self._memory_manager.safe_error("checkpoint restore failed", exc)
@@ -402,9 +412,17 @@ class ChatSession:
         if self._memory_manager is None:
             return
         try:
+            evidence_context = getattr(getattr(self.agent, "context", None), "evidence_context", None)
+            if evidence_context is not None:
+                evidence_context.compact(
+                    [], step=getattr(self.agent, "_current_step", 0), reason="checkpoint",
+                    before_tokens=0, after_tokens=0, truncated=False,
+                )
+                self._evidence_state = evidence_context.checkpoint_state()
             self._memory_manager.save_session(
                 self.session_id, self.repo_path, self._shared_history.to_dicts(),
                 self.round_count, self.total_tokens, self.total_steps,
+                self._evidence_state,
             )
             self.checkpoint_error = None
         except Exception as exc:
@@ -428,8 +446,9 @@ class ChatSession:
         original_append = log._append
 
         def live_append(event):
-            original_append(event)      # 写入 JSONL（磁盘持久化）
+            event_id = original_append(event)  # 写入 JSONL（磁盘持久化）
             _print_event_live(event)    # 实时打印（终端 UI）
+            return event_id
 
         log._append = live_append
 
@@ -465,12 +484,19 @@ class ChatSession:
 
         # 注入共享 history
         agent._pending_history = self._shared_history
+        agent._pending_evidence_state = self._evidence_state
 
         result = agent.run(task, log)
+
+        evidence_context = getattr(getattr(agent, "context", None), "evidence_context", None)
+        if evidence_context is not None:
+            self._evidence_state = evidence_context.checkpoint_state()
 
         # 清除，避免影响下轮（下一轮会重新注入更新的 _shared_history）
         if hasattr(agent, "_pending_history"):
             del agent._pending_history
+        if hasattr(agent, "_pending_evidence_state"):
+            del agent._pending_evidence_state
 
         return result
 
