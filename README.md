@@ -38,6 +38,7 @@ agent chat
 本次框架修复、个性化 PageRank 地图、配置与验证记录见 [框架与 repo-map 升级说明](docs/framework-repo-map-upgrade-2026-10-29.md)。
 从 Aider 原理、旧 Personalized Repo-map 到当前动态检索架构的面试级讲解见 [Repo-map 实现与面试指南](docs/repo-map-aider-to-forge-interview-guide.md)。
 长期记忆的 ADR、安全边界和演进方案见 [Forge Memory 架构设计](docs/forge-agent-memory-architecture.md)，面试讲解见 [Forge Memory 面试指南](docs/forge-memory-interview-guide.md)。
+当前任务的证据账本、Context Capsule、压缩恢复与面试讲解见 [Forge 证据保留型上下文架构](docs/forge-evidence-context-architecture.md)。
 
 ---
 
@@ -96,6 +97,14 @@ agent:
   run_token_limit: 80000  # 整次任务累计用量，含子 Agent；兼容旧名 budget_tokens
 
 context:
+  strategy: evidence_preserving  # evidence_preserving | sliding_window
+  soft_limit_ratio: 0.65
+  compact_limit_ratio: 0.78
+  hard_limit_ratio: 0.90
+  capsule_token_budget: 1500
+  recall_token_budget: 2000
+  evidence_retention_steps: 100
+  enable_history_expand: true
   context_window: 32768   # 单次请求窗口，独立于累计运行预算
   repo_map_budget: 4000   # 地图的估算 token 上限
   repo_map_strategy: retrieval  # retrieval | personalized | global | lexical | legacy
@@ -190,6 +199,12 @@ Agent 通过 `repo_search`、`repo_symbols`、`repo_related_files`、`repo_tree`
 ChatSession 通过 SQLite checkpoint 跨进程恢复；任务结果以结构化 episodic memory 保存。
 Agent 在任务开始或通过 `memory_search` / `memory_get` 按需检索，结果受独立 Token 预算约束，
 并始终作为不可信历史证据注入。代码指纹变化会降权，相关文件消失会失效；第一版不调用 embedding 模型。
+
+**证据保留型任务上下文**
+EventLog 是原始事实源；Evidence Ledger 保存 claim、event ID、文件/diff 哈希与 active/stale 状态；
+Context Capsule 以独立预算注入当前工作状态。裁剪前先原子保存 CompactionRecord，Agent 可用
+`context_recall`、`evidence_get`、`history_expand` 有界恢复旧证据。该系统与跨任务 `memory_search`
+及代码 `repo_search` 保持独立；`sliding_window` 仍可用于兼容和消融。
 
 **流式输出**
 模型 thought 逐 token 实时打印，工具调用实时显示，体验接近 Claude Code。
